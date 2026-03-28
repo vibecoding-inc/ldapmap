@@ -14,4 +14,10 @@ dependencies = ["requests>=2.28.0"]
 ldapmap = "ldapmap:main"
 
 [tool.setuptools]
-py-modules = ["ldapmap"]
+py-modules = [
+    "ldapmap",
+    "ldapmap_constants",
+    "ldapmap_engine",
+    "ldapmap_http",
+    "ldapmap_payloads",
+]
