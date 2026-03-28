@@ -23,6 +23,14 @@ COMMON_ATTRIBUTES = [
     "objectClass",
 ]
 
+# Attribute payload templates used for both discovery and extraction.
+# {value} is the tested prefix (without trailing '*').
+ATTRIBUTE_TEST_TEMPLATES = (
+    ")({attr}={value}*)(",
+    ")({attr}={value}*)({attr}=",
+    ")({attr}={value}*)",
+)
+
 # Payloads used to detect raw injection errors
 DETECTION_PAYLOADS = [
     "*",
