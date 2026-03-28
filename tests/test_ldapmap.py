@@ -113,6 +113,33 @@ class TestIsTrueResponse(unittest.TestCase):
         resp = make_response(302, b"x" * 500)
         self.assertFalse(ldapmap.is_true_response(resp, 200, 500))
 
+    def test_true_statuses_set_supported(self):
+        resp = make_response(202, b"x" * 500)
+        self.assertTrue(ldapmap.is_true_response(resp, {200, 202}, 500))
+
+
+class TestClassifyResponse(unittest.TestCase):
+    def test_unknown_status_is_error(self):
+        resp = make_response(418, b"teapot")
+        self.assertEqual(
+            ldapmap.classify_response(resp, {200}, 100, {401, 403}),
+            "error",
+        )
+
+    def test_false_status_is_false(self):
+        resp = make_response(401, b"denied")
+        self.assertEqual(
+            ldapmap.classify_response(resp, {200}, 100, {401, 403}),
+            "false",
+        )
+
+    def test_true_status_with_matching_length_is_true(self):
+        resp = make_response(200, b"x" * 100)
+        self.assertEqual(
+            ldapmap.classify_response(resp, {200}, 100, {401}),
+            "true",
+        )
+
 
 # ---------------------------------------------------------------------------
 # Tests: send_request
@@ -161,6 +188,17 @@ class TestSendRequest(unittest.TestCase):
             and c.args[0].startswith("[V] POST http://example.com")
         ]
         self.assertTrue(verbose_calls, "Expected a [V] verbose log line")
+
+    def test_verbose_prints_http_status(self):
+        session = MagicMock()
+        session.post.return_value = make_response(201, b"created")
+        with patch("builtins.print") as mock_print:
+            ldapmap.send_request(session, "http://example.com", {"a": "b"}, verbose=True)
+        status_calls = [
+            c for c in mock_print.call_args_list
+            if c.args and c.args[0] == "[V] HTTP 201"
+        ]
+        self.assertTrue(status_calls, "Expected HTTP status in verbose output")
 
     def test_non_verbose_prints_nothing_extra(self):
         """When verbose=False (default), send_request must not produce output."""
@@ -490,6 +528,20 @@ class TestParseArgs(unittest.TestCase):
         args = self._parse(["-u", "http://x", "-d", "a=b", "-p", "a"])
         self.assertIsNone(args.attributes)
 
+    def test_true_status_repeatable(self):
+        args = self._parse([
+            "-u", "http://x", "-d", "a=b", "-p", "a",
+            "--true-status", "200", "--true-status", "302",
+        ])
+        self.assertEqual(args.true_statuses, [200, 302])
+
+    def test_false_status_repeatable(self):
+        args = self._parse([
+            "-u", "http://x", "-d", "a=b", "-p", "a",
+            "--false-status", "401", "--false-status", "403",
+        ])
+        self.assertEqual(args.false_statuses, [401, 403])
+
 
 # ---------------------------------------------------------------------------
 # Tests: main() — integration-level smoke test
@@ -660,6 +712,25 @@ class TestMain(unittest.TestCase):
         detect_call_args = mock_detect.call_args[0]
         # probe_attr is at index 8
         self.assertEqual(detect_call_args[8], "objectClass")
+
+    @patch("ldapmap.discover_attributes", return_value=[])
+    @patch("ldapmap.detect_injection", return_value=False)
+    @patch("ldapmap.calibrate", return_value=(200, 100))
+    @patch("ldapmap.get_baseline", return_value=(200, 100))
+    @patch("ldapmap.build_session")
+    def test_main_forwards_true_false_status_sets(
+        self, mock_session, mock_baseline, mock_calibrate,
+        mock_detect, mock_discover
+    ):
+        with patch("sys.argv", [
+            "ldapmap", "-u", "http://x", "-d", "user=admin&pass=x", "-p", "pass",
+            "--true-status", "200", "--true-status", "302",
+            "--false-status", "401", "--false-status", "403",
+        ]):
+            ldapmap.main()
+
+        self.assertEqual(mock_detect.call_args.kwargs["true_statuses"], {200, 302})
+        self.assertEqual(mock_detect.call_args.kwargs["false_statuses"], {401, 403})
 
 
 if __name__ == "__main__":

