@@ -111,3 +111,10 @@ class TestParseArgs:
             "--extract-filter", "(cn=John)",
         ])
         assert args.extract_filters == ["uid=admin", "(cn=John)"]
+
+    def test_extract_charset(self):
+        args = self._parse([
+            "-u", "http://x", "-d", "a=b", "-p", "a",
+            "--extract-charset", "abc123",
+        ])
+        assert args.extract_charset == "abc123"

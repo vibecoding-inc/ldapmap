@@ -269,3 +269,44 @@ class TestExtractAttribute:
             assert False, "Expected ValueError"
         except ValueError:
             pass
+
+    def test_extract_uses_custom_charset(self):
+        session = MagicMock()
+
+        def side_effect(url, data, timeout):
+            from urllib.parse import unquote
+
+            decoded = unquote(data.get("p", ""))
+            marker = "uid="
+            if marker not in decoded:
+                return make_response(200, b"y" * 999)
+            after = decoded[decoded.index(marker) + len(marker):]
+            if after.endswith("*)(uid="):
+                candidate = after[:-6]
+            elif after.endswith("*)("):
+                candidate = after[:-3]
+            elif after.endswith("*)"):
+                candidate = after[:-2]
+            elif "*" in after:
+                candidate = after.rsplit("*", 1)[0]
+            else:
+                candidate = after
+
+            if "*" in after and candidate in {"", "3"}:
+                return make_response(200, b"x" * 100)
+            if "*" not in after and candidate == "3":
+                return make_response(200, b"x" * 100)
+            return make_response(200, b"y" * 999)
+
+        session.post.side_effect = side_effect
+        result = ldapmap.extract_attribute(
+            session,
+            "http://x",
+            {"p": "v"},
+            "p",
+            "uid",
+            200,
+            100,
+            charset="3",
+        )
+        assert result == "3"
