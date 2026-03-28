@@ -353,7 +353,7 @@ def discover_attributes(
     """
     Iterate through *attributes* and test each with a wildcard payload.
 
-    The payload format is: )(attribute=*)(
+    The payload formats are: )(attribute=*)( and )(attribute=*)
     A "true" response implies that attribute exists on the LDAP entry.
 
     When *attributes* is ``None`` the built-in ``COMMON_ATTRIBUTES`` list is
@@ -368,15 +368,19 @@ def discover_attributes(
     found: list[str] = []
 
     for attr in attributes:
-        payload = f")({attr}=*)("
-        data = build_payload_data(base_data, param, payload, use_json)
-        resp = send_request(session, url, data, verbose, use_json)
-        if resp is None:
-            continue
-        if is_true_response(resp, true_status, true_length):
-            print(f"  [+] Attribute present: {attr}")
-            found.append(attr)
-        else:
+        payload_variants = (f")({attr}=*)(", f")({attr}=*)")
+        present = False
+        for payload in payload_variants:
+            data = build_payload_data(base_data, param, payload, use_json)
+            resp = send_request(session, url, data, verbose, use_json)
+            if resp is None:
+                continue
+            if is_true_response(resp, true_status, true_length):
+                print(f"  [+] Attribute present: {attr}")
+                found.append(attr)
+                present = True
+                break
+        if not present:
             print(f"  [-] Attribute absent:  {attr}")
 
     return found

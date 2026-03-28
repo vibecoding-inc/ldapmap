@@ -349,8 +349,8 @@ class TestDiscoverAttributes(unittest.TestCase):
             attributes=custom_attrs,
         )
         self.assertEqual(found, ["customAttr1"])
-        # Verify only the custom attrs were probed (2 requests)
-        self.assertEqual(session.post.call_count, len(custom_attrs))
+        # customAttr1 matches on the first variation, customAttr2 needs both
+        self.assertEqual(session.post.call_count, 3)
 
     def test_none_attributes_falls_back_to_common(self):
         """Passing attributes=None should behave identically to the default."""
@@ -361,8 +361,8 @@ class TestDiscoverAttributes(unittest.TestCase):
             attributes=None,
         )
         self.assertEqual(found, [])
-        # One request per attribute in COMMON_ATTRIBUTES
-        self.assertEqual(session.post.call_count, len(ldapmap.COMMON_ATTRIBUTES))
+        # With no matches, both payload variations are tried for each attribute
+        self.assertEqual(session.post.call_count, len(ldapmap.COMMON_ATTRIBUTES) * 2)
 
     def test_payload_appends_opening_bracket_for_next_parameter(self):
         """
@@ -377,6 +377,30 @@ class TestDiscoverAttributes(unittest.TestCase):
         first_payload = session.post.call_args_list[0].kwargs["data"]["p"]
         expected = quote(")(uid=*)(", safe="")
         self.assertEqual(first_payload, expected)
+
+    def test_checks_both_payload_variations(self):
+        """
+        Discovery should try payload with trailing '(' first, then fallback to
+        the variant without it.
+        """
+        session = MagicMock()
+
+        def side_effect(url, data, timeout):
+            param_val = data.get("p", "")
+            if param_val == quote(")(uid=*)", safe=""):
+                return make_response(200, b"x" * 100)  # true on fallback variant
+            return make_response(200, b"y" * 300)  # false
+
+        session.post.side_effect = side_effect
+        found = ldapmap.discover_attributes(
+            session, "http://x", {"p": "v"}, "p", 200, 100, attributes=["uid"]
+        )
+        self.assertEqual(found, ["uid"])
+        self.assertEqual(session.post.call_count, 2)
+        first_payload = session.post.call_args_list[0].kwargs["data"]["p"]
+        second_payload = session.post.call_args_list[1].kwargs["data"]["p"]
+        self.assertEqual(first_payload, quote(")(uid=*)(", safe=""))
+        self.assertEqual(second_payload, quote(")(uid=*)", safe=""))
 
 
 # ---------------------------------------------------------------------------
