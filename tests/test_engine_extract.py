@@ -366,3 +366,53 @@ class TestExtractAttribute:
         assert wildcard_candidates[1:4] == ["a", "b", "z"]
         # Then continue depth-first on 'a' before traversing into 'b'.
         assert wildcard_candidates.index("aa") < wildcard_candidates.index("ba")
+
+    def test_single_value_stops_charset_scan_after_first_hit(self):
+        session = MagicMock()
+        wildcard_candidates = []
+
+        def side_effect(url, data, timeout):
+            from urllib.parse import unquote
+
+            decoded = unquote(data.get("p", ""))
+            marker = "uid="
+            if marker not in decoded:
+                return make_response(200, b"y" * 999)
+            after = decoded[decoded.index(marker) + len(marker):]
+            if after.endswith("*)(uid="):
+                candidate = after[:-6]
+            elif after.endswith("*)("):
+                candidate = after[:-3]
+            elif after.endswith("*)"):
+                candidate = after[:-2]
+            elif "*" in after:
+                candidate = after.rsplit("*", 1)[0]
+            else:
+                candidate = after
+
+            if "*" in after:
+                wildcard_candidates.append(candidate)
+                if candidate in {"", "b", "bz"}:
+                    return make_response(200, b"x" * 100)
+            else:
+                if candidate == "bz":
+                    return make_response(200, b"x" * 100)
+            return make_response(200, b"y" * 999)
+
+        session.post.side_effect = side_effect
+        result = ldapmap.extract_attribute(
+            session,
+            "http://x",
+            {"p": "v"},
+            "p",
+            "uid",
+            200,
+            100,
+            charset="abz",
+        )
+
+        assert result == "bz"
+        assert wildcard_candidates[0] == ""
+        # After first-char hit at 'b', do not continue probing 'z' at root.
+        assert wildcard_candidates[1:3] == ["a", "b"]
+        assert "z" not in wildcard_candidates[1:3]

@@ -585,6 +585,8 @@ def extract_attribute(
         for char in charset:
             if matches_prefix(f"{prefix}{char}"):
                 matches.append(char)
+                if not find_all:
+                    break
         children_cache[prefix] = matches
         return matches
 
