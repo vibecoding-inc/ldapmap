@@ -225,13 +225,13 @@ def main() -> None:
         error_sleep_seconds=args.error_sleep_seconds,
     )
 
-    if vulnerable:
-        print("\n[+] Parameter appears to be injectable!")
-    else:
+    if not vulnerable:
         print(
             "\n[*] No distinguishable differences detected. "
             "The parameter may not be injectable, or the responses are indistinguishable."
         )
+    else:
+        print("\n[+] Parameter appears to be injectable!")
 
     if args.extract:
         value = extract_attribute(
@@ -264,30 +264,29 @@ def main() -> None:
             print(f"\n[+] Extracted {args.extract} = {value}")
         else:
             print(f"\n[-] Could not extract value for attribute '{args.extract}'.")
-        return
-
-    attrs = discover_attributes(
-        session,
-        args.url,
-        base_data,
-        args.param,
-        true_status,
-        true_length,
-        args.verbose,
-        use_json,
-        all_attrs,
-        true_statuses=true_statuses,
-        false_statuses=false_statuses,
-        timeout=args.timeout,
-        timeout_retries=args.timeout_retries,
-        sleep_after_error=args.sleep_after_error,
-        error_sleep_seconds=args.error_sleep_seconds,
-    )
-    if attrs:
-        print(f"\n[+] Discovered attributes: {', '.join(attrs)}")
-        print("[*] Re-run with --extract <attribute> to retrieve the full value.")
     else:
-        print("\n[-] No common attributes discovered.")
+        attrs = discover_attributes(
+            session,
+            args.url,
+            base_data,
+            args.param,
+            true_status,
+            true_length,
+            args.verbose,
+            use_json,
+            all_attrs,
+            true_statuses=true_statuses,
+            false_statuses=false_statuses,
+            timeout=args.timeout,
+            timeout_retries=args.timeout_retries,
+            sleep_after_error=args.sleep_after_error,
+            error_sleep_seconds=args.error_sleep_seconds,
+        )
+        if attrs:
+            print(f"\n[+] Discovered attributes: {', '.join(attrs)}")
+            print("[*] Re-run with --extract <attribute> to retrieve the full value.")
+        else:
+            print("\n[-] No common attributes discovered.")
 
 
 if __name__ == "__main__":

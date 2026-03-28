@@ -11,7 +11,12 @@ def make_response(status_code: int, content: bytes) -> MagicMock:
 
 
 def extract_candidate(decoded_value: str, marker: str) -> str | None:
-    """Extract candidate value being probed from a decoded LDAP payload."""
+    """Extract candidate value from a decoded LDAP payload.
+
+    Args:
+        decoded_value: URL-decoded injected LDAP filter fragment.
+        marker: Attribute marker to locate, e.g. ``"uid="``.
+    """
     if marker not in decoded_value:
         return None
 
@@ -26,6 +31,11 @@ def extract_candidate(decoded_value: str, marker: str) -> str | None:
 
 
 def extract_candidate_from_data(data: dict, marker: str) -> str | None:
-    """Decode posted value and extract candidate probe fragment."""
+    """Decode posted data and extract candidate probe fragment.
+
+    Args:
+        data: Request data dictionary containing injectable ``"p"`` value.
+        marker: Attribute marker to locate, e.g. ``"userPassword="``.
+    """
     decoded = unquote(data.get("p", ""))
     return extract_candidate(decoded, marker)
