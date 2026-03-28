@@ -597,42 +597,62 @@ def extract_attribute(
             f"\n  [*] First-character hits: at least {len(first_char_hits)}",
             flush=True,
         )
-    stack: list[str] = []
-    for char in reversed(first_char_hits):
-        stack.append(char)
-    seen_prefixes: set[str] = {""}
+    if find_all:
+        def walk(prefix: str) -> None:
+            if prefix and is_exact_value(prefix):
+                if exclude_value is None or prefix != exclude_value:
+                    found_values.append(prefix)
+                return
 
-    while stack:
-        prefix = stack.pop()
-        if prefix in seen_prefixes:
-            continue
-        seen_prefixes.add(prefix)
+            has_child = False
+            for char in charset:
+                child_prefix = f"{prefix}{char}"
+                if matches_prefix(child_prefix):
+                    has_child = True
+                    walk(child_prefix)
 
-        if prefix and is_exact_value(prefix):
-            if exclude_value is None or prefix != exclude_value:
-                found_values.append(prefix)
-                if not find_all:
+            if prefix and not has_child:
+                # Terminal prefix fallback: when no longer prefix matches exist,
+                # treat it as a candidate value even if exact probes are not
+                # supported by the target query construction.
+                if exclude_value is None or prefix != exclude_value:
+                    if prefix not in found_values:
+                        found_values.append(prefix)
+
+        for char in first_char_hits:
+            walk(char)
+    else:
+        stack: list[str] = []
+        for char in reversed(first_char_hits):
+            stack.append(char)
+        seen_prefixes: set[str] = {""}
+
+        while stack:
+            prefix = stack.pop()
+            if prefix in seen_prefixes:
+                continue
+            seen_prefixes.add(prefix)
+
+            if prefix and is_exact_value(prefix):
+                if exclude_value is None or prefix != exclude_value:
+                    found_values.append(prefix)
                     print(prefix, end="", flush=True)
                     print()
                     return prefix
-                # In find-all mode, once this exact value is found, continue DFS
-                # with the next known branch instead of probing deeper here.
-                continue
 
-        child_chars = next_chars(prefix)
-        for char in reversed(child_chars):
-            child_prefix = f"{prefix}{char}"
-            if child_prefix not in seen_prefixes:
-                stack.append(child_prefix)
+            child_chars = next_chars(prefix)
+            for char in reversed(child_chars):
+                child_prefix = f"{prefix}{char}"
+                if child_prefix not in seen_prefixes:
+                    stack.append(child_prefix)
 
-        if prefix and not child_chars:
-            # Terminal prefix fallback: when no longer prefix matches exist,
-            # treat it as a candidate value even if exact probes are not
-            # supported by the target query construction.
-            if exclude_value is None or prefix != exclude_value:
-                if prefix not in found_values:
-                    found_values.append(prefix)
-                    if not find_all:
+            if prefix and not child_chars:
+                # Terminal prefix fallback: when no longer prefix matches exist,
+                # treat it as a candidate value even if exact probes are not
+                # supported by the target query construction.
+                if exclude_value is None or prefix != exclude_value:
+                    if prefix not in found_values:
+                        found_values.append(prefix)
                         print(prefix, end="", flush=True)
                         print()
                         return prefix

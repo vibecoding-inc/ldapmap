@@ -481,3 +481,60 @@ class TestExtractAttribute:
         assert "aba" not in wildcard_candidates
         assert "abb" not in wildcard_candidates
         assert "abc" not in wildcard_candidates
+
+    def test_find_all_descends_before_sibling_scan_for_admin_style_value(self):
+        values = {"admin"}
+        session = MagicMock()
+        wildcard_candidates = []
+
+        def side_effect(url, data, timeout):
+            from urllib.parse import unquote
+
+            decoded = unquote(data.get("p", ""))
+            marker = "uid="
+            if marker not in decoded:
+                return make_response(200, b"y" * 999)
+            after = decoded[decoded.index(marker) + len(marker):]
+            if after.endswith("*)(uid="):
+                candidate = after[:-6]
+            elif after.endswith("*)("):
+                candidate = after[:-3]
+            elif after.endswith("*)"):
+                candidate = after[:-2]
+            elif after.endswith(")(uid="):
+                candidate = after[:-6]
+            elif after.endswith(")("):
+                candidate = after[:-2]
+            elif after.endswith(")"):
+                candidate = after[:-1]
+            elif "*" in after:
+                candidate = after.rsplit("*", 1)[0]
+            else:
+                candidate = after
+
+            if "*" in after:
+                wildcard_candidates.append(candidate)
+                if any(v.startswith(candidate) for v in values):
+                    return make_response(200, b"x" * 100)
+            else:
+                if candidate in values:
+                    return make_response(200, b"x" * 100)
+            return make_response(200, b"y" * 999)
+
+        session.post.side_effect = side_effect
+        result = ldapmap.extract_attribute(
+            session,
+            "http://x",
+            {"p": "v"},
+            "p",
+            "uid",
+            200,
+            100,
+            find_all=True,
+            charset="abcdefghijklmnopqrstuvwxyz",
+        )
+
+        assert result == ["admin"]
+        # Must keep descending on known DFS path after ad* (to ada* / adm*)
+        # before scanning siblings like ae*.
+        assert wildcard_candidates.index("adm") < wildcard_candidates.index("ae")
