@@ -615,6 +615,9 @@ def extract_attribute(
                     print(prefix, end="", flush=True)
                     print()
                     return prefix
+                # In find-all mode, once this exact value is found, continue DFS
+                # with the next known branch instead of probing deeper here.
+                continue
 
         child_chars = next_chars(prefix)
         for char in reversed(child_chars):
