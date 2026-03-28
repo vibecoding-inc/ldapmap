@@ -207,6 +207,24 @@ def parse_args() -> argparse.Namespace:
         ),
     )
     parser.add_argument(
+        "--exclude-value",
+        metavar="VALUE",
+        default=None,
+        help=(
+            "Value to skip while extracting. Useful when you already know one "
+            "value and want to continue searching for others."
+        ),
+    )
+    parser.add_argument(
+        "--find-all",
+        action="store_true",
+        default=False,
+        help=(
+            "Search for all possible values of the extracted attribute instead "
+            "of stopping at the first one."
+        ),
+    )
+    parser.add_argument(
         "-v", "--verbose",
         action="store_true",
         default=False,
@@ -339,8 +357,14 @@ def main() -> None:
             session, args.url, base_data, args.param,
             args.extract, true_status, true_length, args.verbose, use_json,
             true_statuses=true_statuses, false_statuses=false_statuses,
+            exclude_value=args.exclude_value, find_all=args.find_all,
         )
-        if value:
+        if isinstance(value, list):
+            if value:
+                print(f"\n[+] Extracted {args.extract} values: {', '.join(value)}")
+            else:
+                print(f"\n[-] Could not extract value for attribute '{args.extract}'.")
+        elif value:
             print(f"\n[+] Extracted {args.extract} = {value}")
         else:
             print(f"\n[-] Could not extract value for attribute '{args.extract}'.")

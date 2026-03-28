@@ -81,3 +81,133 @@ class TestExtractAttribute:
             session, "http://x", {"p": "v"}, "p", "userPassword", 200, 100
         )
         assert result == target
+
+    def test_excludes_specific_value(self):
+        target = "ab"
+        session = MagicMock()
+
+        def side_effect(url, data, timeout):
+            from urllib.parse import unquote
+            decoded = unquote(data.get("p", ""))
+            marker = "userPassword="
+            if marker in decoded:
+                after = decoded[decoded.index(marker) + len(marker):]
+                if after.endswith("*)(userPassword="):
+                    candidate = after[:-16]
+                elif after.endswith("*)("):
+                    candidate = after[:-3]
+                elif after.endswith("*)"):
+                    candidate = after[:-2]
+                elif "*" in after:
+                    candidate = after.rsplit("*", 1)[0]
+                else:
+                    candidate = after
+                if target.startswith(candidate):
+                    return make_response(200, b"x" * 100)
+            return make_response(200, b"y" * 999)
+
+        session.post.side_effect = side_effect
+        result = ldapmap.extract_attribute(
+            session,
+            "http://x",
+            {"p": "v"},
+            "p",
+            "userPassword",
+            200,
+            100,
+            exclude_value="ab",
+        )
+        assert result == ""
+
+    def test_find_all_extracts_multiple_values(self):
+        values = {"admin", "john"}
+        session = MagicMock()
+
+        def side_effect(url, data, timeout):
+            from urllib.parse import unquote
+            decoded = unquote(data.get("p", ""))
+            marker = "uid="
+            if marker not in decoded:
+                return make_response(200, b"y" * 999)
+            after = decoded[decoded.index(marker) + len(marker):]
+            if after.endswith("*)(uid="):
+                candidate = after[:-6]
+            elif after.endswith("*)("):
+                candidate = after[:-3]
+            elif after.endswith("*)"):
+                candidate = after[:-2]
+            elif after.endswith(")("):
+                candidate = after[:-2]
+            else:
+                candidate = after
+
+            if "*" in after:
+                if any(v.startswith(candidate) for v in values):
+                    return make_response(200, b"x" * 100)
+            else:
+                if candidate in values:
+                    return make_response(200, b"x" * 100)
+            return make_response(200, b"y" * 999)
+
+        session.post.side_effect = side_effect
+        result = ldapmap.extract_attribute(
+            session,
+            "http://x",
+            {"p": "v"},
+            "p",
+            "uid",
+            200,
+            100,
+            find_all=True,
+        )
+        assert sorted(result) == ["admin", "john"]
+
+    def test_query_cache_reuses_prefix_checks(self):
+        values = {"ab", "ac"}
+        session = MagicMock()
+        seen = {}
+
+        def side_effect(url, data, timeout):
+            from urllib.parse import unquote
+            decoded = unquote(data.get("p", ""))
+            marker = "uid="
+            if marker not in decoded:
+                return make_response(200, b"y" * 999)
+            after = decoded[decoded.index(marker) + len(marker):]
+            if after.endswith("*)(uid="):
+                candidate = after[:-6]
+            elif after.endswith("*)("):
+                candidate = after[:-3]
+            elif after.endswith("*)"):
+                candidate = after[:-2]
+            elif after.endswith(")("):
+                candidate = after[:-2]
+            else:
+                candidate = after
+
+            cache_key = ("*" in after, candidate)
+            seen[cache_key] = seen.get(cache_key, 0) + 1
+
+            if "*" in after:
+                if any(v.startswith(candidate) for v in values):
+                    return make_response(200, b"x" * 100)
+            else:
+                if candidate in values:
+                    return make_response(200, b"x" * 100)
+            return make_response(200, b"y" * 999)
+
+        session.post.side_effect = side_effect
+        result = ldapmap.extract_attribute(
+            session,
+            "http://x",
+            {"p": "v"},
+            "p",
+            "uid",
+            200,
+            100,
+            find_all=True,
+        )
+
+        assert sorted(result) == ["ab", "ac"]
+        # Prefix checks are cached; each distinct prefix is requested once.
+        assert seen[(True, "a")] == 1

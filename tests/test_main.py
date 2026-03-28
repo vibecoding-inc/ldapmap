@@ -176,3 +176,23 @@ class TestMain:
 
         assert mock_detect.call_args.kwargs["true_statuses"] == {200, 302}
         assert mock_detect.call_args.kwargs["false_statuses"] == {401, 403}
+
+    @patch("ldapmap.extract_attribute", return_value="secret")
+    @patch("ldapmap.detect_injection", return_value=True)
+    @patch("ldapmap.calibrate", return_value=(200, 100))
+    @patch("ldapmap.get_baseline", return_value=(200, 100))
+    @patch("ldapmap.build_session")
+    def test_main_forwards_extract_search_options(
+        self, mock_session, mock_baseline, mock_calibrate,
+        mock_detect, mock_extract
+    ):
+        with patch("sys.argv", [
+            "ldapmap", "-u", "http://x", "-d", "user=admin&pass=x",
+            "-p", "pass", "--extract", "uid",
+            "--exclude-value", "admin", "--find-all",
+        ]):
+            ldapmap.main()
+
+        kwargs = mock_extract.call_args.kwargs
+        assert kwargs["exclude_value"] == "admin"
+        assert kwargs["find_all"] is True
