@@ -364,6 +364,20 @@ class TestDiscoverAttributes(unittest.TestCase):
         # One request per attribute in COMMON_ATTRIBUTES
         self.assertEqual(session.post.call_count, len(ldapmap.COMMON_ATTRIBUTES))
 
+    def test_payload_appends_opening_bracket_for_next_parameter(self):
+        """
+        Discovery payloads should keep the query syntactically open so the next
+        server-side parameter contributes a balancing close.
+        """
+        session = MagicMock()
+        session.post.return_value = make_response(200, b"z" * 999)
+
+        ldapmap.discover_attributes(session, "http://x", {"p": "v"}, "p", 200, 100)
+
+        first_payload = session.post.call_args_list[0].kwargs["data"]["p"]
+        expected = quote(")(uid=*)(", safe="")
+        self.assertEqual(first_payload, expected)
+
 
 # ---------------------------------------------------------------------------
 # Tests: extract_attribute
