@@ -16,6 +16,7 @@ ldapmap = "ldapmap:main"
 [tool.setuptools]
 py-modules = [
     "ldapmap",
+    "ldapmap_cli",
     "ldapmap_constants",
     "ldapmap_engine",
     "ldapmap_http",
