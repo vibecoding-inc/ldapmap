@@ -360,7 +360,9 @@ class TestExtractAttribute:
         assert sorted(result) == ["aa", "bz"]
         output = capsys.readouterr().out
         assert "First-character hits: at least 2" in output
-        # First character checks should test the entire charset before deeper probes.
+        # Index 0 is the template-discovery probe for empty prefix ("").
+        # First character checks should then test the entire charset before deeper probes.
+        assert wildcard_candidates[0] == ""
         assert wildcard_candidates[1:4] == ["a", "b", "z"]
         # Then continue depth-first on 'a' before traversing into 'b'.
         assert wildcard_candidates.index("aa") < wildcard_candidates.index("ba")

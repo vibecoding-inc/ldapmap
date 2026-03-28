@@ -606,7 +606,7 @@ def extract_attribute(
             continue
         seen_prefixes.add(prefix)
 
-        if is_exact_value(prefix):
+        if prefix and is_exact_value(prefix):
             if exclude_value is None or prefix != exclude_value:
                 found_values.append(prefix)
                 if not find_all:
