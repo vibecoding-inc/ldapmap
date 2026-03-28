@@ -122,7 +122,6 @@ class TestParseArgs:
             "--extract-charset", "abc123",
         ])
         assert args.extract_charset == "abc123"
-
     def test_timeout_and_retry_options(self):
         args = self._parse([
             "-u", "http://x", "-d", "a=b", "-p", "a",

@@ -235,7 +235,6 @@ class TestMain:
 
         kwargs = mock_extract.call_args.kwargs
         assert kwargs["charset"] == "abc123"
-
     @patch("ldapmap.discover_attributes", return_value=[])
     @patch("ldapmap.detect_injection", return_value=False)
     @patch("ldapmap.calibrate", return_value=(200, 100))
