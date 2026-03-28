@@ -367,7 +367,7 @@ class TestExtractAttribute:
         # Then continue depth-first on 'a' before traversing into 'b'.
         assert wildcard_candidates.index("aa") < wildcard_candidates.index("ba")
 
-    def test_single_value_stops_charset_scan_after_first_hit(self):
+    def test_charset_scan_stops_after_first_match_when_not_find_all(self):
         session = MagicMock()
         wildcard_candidates = []
 
@@ -415,4 +415,3 @@ class TestExtractAttribute:
         assert wildcard_candidates[0] == ""
         # After first-char hit at 'b', do not continue probing 'z' at root.
         assert wildcard_candidates[1:3] == ["a", "b"]
-        assert "z" not in wildcard_candidates[1:3]
