@@ -32,5 +32,9 @@
           program = "${self.packages.${system}.default}/bin/ldapmap";
         };
       });
+
+      checks = forAllSystems (system: {
+        build = self.packages.${system}.default;
+      });
     };
 }
