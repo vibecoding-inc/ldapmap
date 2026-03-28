@@ -386,6 +386,7 @@ def extract_attribute(
     exclude_value: str | None = None,
     find_all: bool = False,
     extraction_filters: list[str] | None = None,
+    charset: str = CHARSET,
 ) -> str | list[str]:
     """
     Extract one or more values of *attribute* using LDAP wildcard probes.
@@ -480,7 +481,7 @@ def extract_attribute(
         if prefix in children_cache:
             return children_cache[prefix]
         matches: list[str] = []
-        for char in CHARSET:
+        for char in charset:
             if matches_prefix(f"{prefix}{char}"):
                 matches.append(char)
         children_cache[prefix] = matches

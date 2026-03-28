@@ -219,6 +219,15 @@ def parse_args() -> argparse.Namespace:
         ),
     )
     parser.add_argument(
+        "--extract-charset",
+        metavar="CHARS",
+        default=CHARSET,
+        help=(
+            "Character set used during blind extraction probes. "
+            "Defaults to built-in charset."
+        ),
+    )
+    parser.add_argument(
         "--exclude-value",
         metavar="VALUE",
         default=None,
@@ -371,6 +380,7 @@ def main() -> None:
             true_statuses=true_statuses, false_statuses=false_statuses,
             exclude_value=args.exclude_value, find_all=args.find_all,
             extraction_filters=args.extract_filters,
+            charset=args.extract_charset,
         )
         if isinstance(value, list):
             if value:
