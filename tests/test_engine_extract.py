@@ -310,3 +310,57 @@ class TestExtractAttribute:
             charset="3",
         )
         assert result == "3"
+
+    def test_find_all_reports_first_char_hits_and_uses_depth_first_search(self, capsys):
+        values = {"aa", "bz"}
+        session = MagicMock()
+        wildcard_candidates = []
+
+        def side_effect(url, data, timeout):
+            from urllib.parse import unquote
+
+            decoded = unquote(data.get("p", ""))
+            marker = "uid="
+            if marker not in decoded:
+                return make_response(200, b"y" * 999)
+            after = decoded[decoded.index(marker) + len(marker):]
+            if after.endswith("*)(uid="):
+                candidate = after[:-6]
+            elif after.endswith("*)("):
+                candidate = after[:-3]
+            elif after.endswith("*)"):
+                candidate = after[:-2]
+            elif "*" in after:
+                candidate = after.rsplit("*", 1)[0]
+            else:
+                candidate = after
+
+            if "*" in after:
+                wildcard_candidates.append(candidate)
+                if any(v.startswith(candidate) for v in values):
+                    return make_response(200, b"x" * 100)
+            else:
+                if candidate in values:
+                    return make_response(200, b"x" * 100)
+            return make_response(200, b"y" * 999)
+
+        session.post.side_effect = side_effect
+        result = ldapmap.extract_attribute(
+            session,
+            "http://x",
+            {"p": "v"},
+            "p",
+            "uid",
+            200,
+            100,
+            find_all=True,
+            charset="abz",
+        )
+
+        assert sorted(result) == ["aa", "bz"]
+        output = capsys.readouterr().out
+        assert "First-character hits: at least 2" in output
+        # First character checks should test the entire charset before deeper probes.
+        assert wildcard_candidates[1:4] == ["a", "b", "z"]
+        # Then continue depth-first on 'a' before traversing into 'b'.
+        assert wildcard_candidates.index("aa") < wildcard_candidates.index("ba")

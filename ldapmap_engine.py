@@ -589,8 +589,16 @@ def extract_attribute(
         return matches
 
     found_values: list[str] = []
-    stack: list[str] = [""]
-    seen_prefixes: set[str] = set()
+    first_char_hits = next_chars("")
+    if find_all:
+        print(
+            f"\n  [*] First-character hits: at least {len(first_char_hits)}",
+            flush=True,
+        )
+    stack: list[str] = []
+    for char in reversed(first_char_hits):
+        stack.append(char)
+    seen_prefixes: set[str] = {""}
 
     while stack:
         prefix = stack.pop()
@@ -598,20 +606,17 @@ def extract_attribute(
             continue
         seen_prefixes.add(prefix)
 
+        if is_exact_value(prefix):
+            if exclude_value is None or prefix != exclude_value:
+                found_values.append(prefix)
+                if not find_all:
+                    print(prefix, end="", flush=True)
+                    print()
+                    return prefix
+
         child_chars = next_chars(prefix)
         for char in reversed(child_chars):
             child_prefix = f"{prefix}{char}"
-
-            # After each discovered character, test exact match.
-            if is_exact_value(child_prefix):
-                if exclude_value is None or child_prefix != exclude_value:
-                    found_values.append(child_prefix)
-                    if not find_all:
-                        print(child_prefix, end="", flush=True)
-                        print()
-                        return child_prefix
-                # Even when exact, continue exploring deeper values
-                # that share the same prefix.
             if child_prefix not in seen_prefixes:
                 stack.append(child_prefix)
 
