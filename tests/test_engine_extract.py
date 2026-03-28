@@ -287,6 +287,8 @@ class TestExtractAttribute:
                 candidate = after[:-3]
             elif after.endswith("*)"):
                 candidate = after[:-2]
+            elif after.endswith(")(uid="):
+                candidate = after[:-6]
             elif "*" in after:
                 candidate = after.rsplit("*", 1)[0]
             else:
@@ -330,6 +332,8 @@ class TestExtractAttribute:
                 candidate = after[:-3]
             elif after.endswith("*)"):
                 candidate = after[:-2]
+            elif after.endswith(")(uid="):
+                candidate = after[:-6]
             elif "*" in after:
                 candidate = after.rsplit("*", 1)[0]
             else:
@@ -366,3 +370,171 @@ class TestExtractAttribute:
         assert wildcard_candidates[1:4] == ["a", "b", "z"]
         # Then continue depth-first on 'a' before traversing into 'b'.
         assert wildcard_candidates.index("aa") < wildcard_candidates.index("ba")
+
+    def test_charset_scan_stops_after_first_match_when_not_find_all(self):
+        session = MagicMock()
+        wildcard_candidates = []
+
+        def side_effect(url, data, timeout):
+            from urllib.parse import unquote
+
+            decoded = unquote(data.get("p", ""))
+            marker = "uid="
+            if marker not in decoded:
+                return make_response(200, b"y" * 999)
+            after = decoded[decoded.index(marker) + len(marker):]
+            if after.endswith("*)(uid="):
+                candidate = after[:-6]
+            elif after.endswith("*)("):
+                candidate = after[:-3]
+            elif after.endswith("*)"):
+                candidate = after[:-2]
+            elif after.endswith(")("):
+                candidate = after[:-2]
+            elif "*" in after:
+                candidate = after.rsplit("*", 1)[0]
+            else:
+                candidate = after
+
+            if "*" in after:
+                wildcard_candidates.append(candidate)
+                if candidate in {"", "b", "bz"}:
+                    return make_response(200, b"x" * 100)
+            else:
+                if candidate == "bz":
+                    return make_response(200, b"x" * 100)
+            return make_response(200, b"y" * 999)
+
+        session.post.side_effect = side_effect
+        result = ldapmap.extract_attribute(
+            session,
+            "http://x",
+            {"p": "v"},
+            "p",
+            "uid",
+            200,
+            100,
+            charset="abz",
+        )
+
+        assert result == "bz"
+        assert wildcard_candidates[0] == ""
+        # After first-char hit at 'b', do not continue probing 'z' at root.
+        assert wildcard_candidates[1:3] == ["a", "b"]
+
+    def test_find_all_continues_with_next_known_dfs_branch_after_exact_hit(self):
+        values = {"ab", "ac"}
+        session = MagicMock()
+        wildcard_candidates = []
+
+        def side_effect(url, data, timeout):
+            from urllib.parse import unquote
+
+            decoded = unquote(data.get("p", ""))
+            marker = "uid="
+            if marker not in decoded:
+                return make_response(200, b"y" * 999)
+            after = decoded[decoded.index(marker) + len(marker):]
+            if after.endswith("*)(uid="):
+                candidate = after[:-6]
+            elif after.endswith("*)("):
+                candidate = after[:-3]
+            elif after.endswith("*)"):
+                candidate = after[:-2]
+            elif after.endswith(")(uid="):
+                candidate = after[:-6]
+            elif after.endswith(")("):
+                candidate = after[:-2]
+            elif after.endswith(")"):
+                candidate = after[:-1]
+            elif "*" in after:
+                candidate = after.rsplit("*", 1)[0]
+            else:
+                candidate = after
+
+            if "*" in after:
+                wildcard_candidates.append(candidate)
+                if any(v.startswith(candidate) for v in values):
+                    return make_response(200, b"x" * 100)
+            else:
+                if candidate in values:
+                    return make_response(200, b"x" * 100)
+            return make_response(200, b"y" * 999)
+
+        session.post.side_effect = side_effect
+        result = ldapmap.extract_attribute(
+            session,
+            "http://x",
+            {"p": "v"},
+            "p",
+            "uid",
+            200,
+            100,
+            find_all=True,
+            charset="abc",
+        )
+
+        assert sorted(result) == ["ab", "ac"]
+        # After exact hit at "ab", traversal should continue to sibling "ac"
+        # and not probe deeper descendants of "ab" (e.g., "aba", "abb", "abc").
+        assert "ac" in wildcard_candidates
+        assert "aba" not in wildcard_candidates
+        assert "abb" not in wildcard_candidates
+        assert "abc" not in wildcard_candidates
+
+    def test_find_all_descends_before_sibling_scan_for_admin_style_value(self):
+        values = {"admin"}
+        session = MagicMock()
+        wildcard_candidates = []
+
+        def side_effect(url, data, timeout):
+            from urllib.parse import unquote
+
+            decoded = unquote(data.get("p", ""))
+            marker = "uid="
+            if marker not in decoded:
+                return make_response(200, b"y" * 999)
+            after = decoded[decoded.index(marker) + len(marker):]
+            if after.endswith("*)(uid="):
+                candidate = after[:-6]
+            elif after.endswith("*)("):
+                candidate = after[:-3]
+            elif after.endswith("*)"):
+                candidate = after[:-2]
+            elif after.endswith(")(uid="):
+                candidate = after[:-6]
+            elif after.endswith(")("):
+                candidate = after[:-2]
+            elif after.endswith(")"):
+                candidate = after[:-1]
+            elif "*" in after:
+                candidate = after.rsplit("*", 1)[0]
+            else:
+                candidate = after
+
+            if "*" in after:
+                wildcard_candidates.append(candidate)
+                if any(v.startswith(candidate) for v in values):
+                    return make_response(200, b"x" * 100)
+            else:
+                if candidate in values:
+                    return make_response(200, b"x" * 100)
+            return make_response(200, b"y" * 999)
+
+        session.post.side_effect = side_effect
+        result = ldapmap.extract_attribute(
+            session,
+            "http://x",
+            {"p": "v"},
+            "p",
+            "uid",
+            200,
+            100,
+            find_all=True,
+            charset="abcdefghijklmnopqrstuvwxyz",
+        )
+
+        assert result == ["admin"]
+        # Must keep descending on known DFS path after ad* (to ada* / adm*)
+        # before scanning siblings like ae*.
+        assert wildcard_candidates.index("adm") < wildcard_candidates.index("ae")
