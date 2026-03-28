@@ -89,3 +89,17 @@ class TestParseArgs:
             "--false-status", "401", "--false-status", "403",
         ])
         assert args.false_statuses == [401, 403]
+
+    def test_exclude_value(self):
+        args = self._parse([
+            "-u", "http://x", "-d", "a=b", "-p", "a",
+            "--exclude-value", "admin",
+        ])
+        assert args.exclude_value == "admin"
+
+    def test_find_all_flag(self):
+        args = self._parse([
+            "-u", "http://x", "-d", "a=b", "-p", "a",
+            "--find-all",
+        ])
+        assert args.find_all is True

