@@ -1,0 +1,17 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "ldapmap"
+version = "0.1.0"
+description = "Blind LDAP Injection Scanner and Extractor"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = ["requests>=2.28.0"]
+
+[project.scripts]
+ldapmap = "ldapmap:main"
+
+[tool.setuptools]
+py-modules = ["ldapmap"]
