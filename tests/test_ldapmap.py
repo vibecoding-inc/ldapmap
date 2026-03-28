@@ -145,6 +145,31 @@ class TestSendRequest(unittest.TestCase):
         resp = ldapmap.send_request(session, "http://example.com", {})
         self.assertIsNone(resp)
 
+    def test_verbose_prints_payload(self):
+        """When verbose=True, send_request should print the URL and POST data."""
+        session = MagicMock()
+        session.post.return_value = make_response(200, b"ok")
+        with patch("builtins.print") as mock_print:
+            ldapmap.send_request(
+                session, "http://example.com", {"user": "admin", "pass": "x"},
+                verbose=True,
+            )
+        # At least one print call must start with "[V] POST <url>"
+        verbose_calls = [
+            c for c in mock_print.call_args_list
+            if c.args and isinstance(c.args[0], str)
+            and c.args[0].startswith("[V] POST http://example.com")
+        ]
+        self.assertTrue(verbose_calls, "Expected a [V] verbose log line")
+
+    def test_non_verbose_prints_nothing_extra(self):
+        """When verbose=False (default), send_request must not produce output."""
+        session = MagicMock()
+        session.post.return_value = make_response(200, b"ok")
+        with patch("builtins.print") as mock_print:
+            ldapmap.send_request(session, "http://example.com", {"a": "b"})
+        mock_print.assert_not_called()
+
     def test_form_mode_uses_data_kwarg(self):
         session = MagicMock()
         session.post.return_value = make_response(200, b"ok")
@@ -355,6 +380,18 @@ class TestParseArgs(unittest.TestCase):
                             "--extract", "userPassword"])
         self.assertEqual(args.extract, "userPassword")
 
+    def test_verbose_flag_short(self):
+        args = self._parse(["-u", "http://x", "-d", "a=b", "-p", "a", "-v"])
+        self.assertTrue(args.verbose)
+
+    def test_verbose_flag_long(self):
+        args = self._parse(["-u", "http://x", "-d", "a=b", "-p", "a", "--verbose"])
+        self.assertTrue(args.verbose)
+
+    def test_verbose_defaults_to_false(self):
+        args = self._parse(["-u", "http://x", "-d", "a=b", "-p", "a"])
+        self.assertFalse(args.verbose)
+
     def test_missing_required_exits(self):
         with self.assertRaises(SystemExit):
             self._parse(["-u", "http://x"])  # missing -d/-jsondata and -p
@@ -470,8 +507,8 @@ class TestMain(unittest.TestCase):
         mock_discover.assert_called_once()
         # Verify use_json=True was forwarded to discover_attributes
         args_positional = mock_discover.call_args[0]
-        # discover_attributes(session, url, base_data, param, true_status, true_length, use_json)
-        self.assertEqual(args_positional[6], True)
+        # discover_attributes(session, url, base_data, param, true_status, true_length, verbose, use_json)
+        self.assertEqual(args_positional[7], True)
 
     @patch("ldapmap.extract_attribute", return_value="user@example.com")
     @patch("ldapmap.detect_injection", return_value=True)
@@ -491,8 +528,8 @@ class TestMain(unittest.TestCase):
             ldapmap.main()
         mock_extract.assert_called_once()
         args_positional = mock_extract.call_args[0]
-        # extract_attribute(session, url, base_data, param, attribute, true_status, true_length, use_json)
-        self.assertEqual(args_positional[7], True)
+        # extract_attribute(session, url, base_data, param, attribute, true_status, true_length, verbose, use_json)
+        self.assertEqual(args_positional[8], True)
 
 
 if __name__ == "__main__":

