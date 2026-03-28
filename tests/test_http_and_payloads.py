@@ -67,6 +67,7 @@ class TestSendRequest:
         session.post.side_effect = ldapmap.requests.exceptions.Timeout()
         resp = ldapmap.send_request(session, "http://example.com", {})
         assert resp is None
+        assert session.post.call_count == ldapmap.TIMEOUT_RETRIES + 1
 
     def test_generic_request_exception_returns_none(self):
         session = MagicMock()
@@ -122,3 +123,45 @@ class TestSendRequest:
         session.post.assert_called_once_with(
             "http://example.com", json={"a": "b"}, timeout=ldapmap.TIMEOUT
         )
+
+    def test_custom_timeout_is_forwarded(self):
+        session = MagicMock()
+        session.post.return_value = make_response(200, b"ok")
+        ldapmap.send_request(session, "http://example.com", {"a": "b"}, timeout=1.5)
+        session.post.assert_called_once_with(
+            "http://example.com", data={"a": "b"}, timeout=1.5
+        )
+
+    def test_timeout_retry_then_success(self):
+        session = MagicMock()
+        session.post.side_effect = [
+            ldapmap.requests.exceptions.Timeout(),
+            make_response(200, b"ok"),
+        ]
+        resp = ldapmap.send_request(
+            session,
+            "http://example.com",
+            {"a": "b"},
+            timeout_retries=2,
+            sleep_after_error=False,
+        )
+        assert resp is not None
+        assert resp.status_code == 200
+        assert session.post.call_count == 2
+
+    def test_sleep_after_error_on_timeout_retry(self):
+        session = MagicMock()
+        session.post.side_effect = [
+            ldapmap.requests.exceptions.Timeout(),
+            make_response(200, b"ok"),
+        ]
+        with patch("ldapmap_http.time.sleep") as mock_sleep:
+            ldapmap.send_request(
+                session,
+                "http://example.com",
+                {"a": "b"},
+                timeout_retries=2,
+                sleep_after_error=True,
+                error_sleep_seconds=2,
+            )
+        mock_sleep.assert_called_once_with(2)

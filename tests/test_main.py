@@ -235,3 +235,36 @@ class TestMain:
 
         kwargs = mock_extract.call_args.kwargs
         assert kwargs["charset"] == "abc123"
+    @patch("ldapmap.discover_attributes", return_value=[])
+    @patch("ldapmap.detect_injection", return_value=False)
+    @patch("ldapmap.calibrate", return_value=(200, 100))
+    @patch("ldapmap.get_baseline", return_value=(200, 100))
+    @patch("ldapmap.build_session")
+    def test_main_forwards_timeout_and_sleep_options(
+        self, mock_session, mock_baseline, mock_calibrate,
+        mock_detect, mock_discover
+    ):
+        with patch("sys.argv", [
+            "ldapmap", "-u", "http://x", "-d", "user=admin&pass=x", "-p", "pass",
+            "--timeout", "1.5", "--timeout-retries", "4",
+            "--error-sleep-seconds", "2", "--no-sleep-after-error",
+        ]):
+            ldapmap.main()
+
+        baseline_kwargs = mock_baseline.call_args.kwargs
+        assert baseline_kwargs["timeout"] == 1.5
+        assert baseline_kwargs["timeout_retries"] == 4
+        assert baseline_kwargs["sleep_after_error"] is False
+        assert baseline_kwargs["error_sleep_seconds"] == 2
+
+        detect_kwargs = mock_detect.call_args.kwargs
+        assert detect_kwargs["timeout"] == 1.5
+        assert detect_kwargs["timeout_retries"] == 4
+        assert detect_kwargs["sleep_after_error"] is False
+        assert detect_kwargs["error_sleep_seconds"] == 2
+
+        discover_kwargs = mock_discover.call_args.kwargs
+        assert discover_kwargs["timeout"] == 1.5
+        assert discover_kwargs["timeout_retries"] == 4
+        assert discover_kwargs["sleep_after_error"] is False
+        assert discover_kwargs["error_sleep_seconds"] == 2
