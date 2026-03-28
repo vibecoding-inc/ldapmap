@@ -211,3 +211,61 @@ class TestExtractAttribute:
         assert sorted(result) == ["ab", "ac"]
         # Prefix checks are cached; each distinct prefix is requested once.
         assert seen[(True, "a")] == 1
+
+    def test_extract_with_manual_filter_constraints(self):
+        target = "123"
+        session = MagicMock()
+
+        def side_effect(url, data, timeout):
+            from urllib.parse import unquote
+
+            decoded = unquote(data.get("p", ""))
+            if "(uid=admin)" not in decoded:
+                return make_response(200, b"y" * 999)
+            marker = "telephoneNumber="
+            if marker not in decoded:
+                return make_response(200, b"y" * 999)
+            after = decoded[decoded.index(marker) + len(marker):]
+            if after.endswith("*)(telephoneNumber="):
+                candidate = after[:-18]
+            elif after.endswith("*)("):
+                candidate = after[:-3]
+            elif after.endswith("*)"):
+                candidate = after[:-2]
+            elif "*" in after:
+                candidate = after.rsplit("*", 1)[0]
+            else:
+                candidate = after
+            if target.startswith(candidate):
+                return make_response(200, b"x" * 100)
+            return make_response(200, b"y" * 999)
+
+        session.post.side_effect = side_effect
+        result = ldapmap.extract_attribute(
+            session,
+            "http://x",
+            {"p": "v"},
+            "p",
+            "telephoneNumber",
+            200,
+            100,
+            extraction_filters=["uid=admin"],
+        )
+        assert result == target
+
+    def test_extract_filter_validation_error(self):
+        session = MagicMock()
+        try:
+            ldapmap.extract_attribute(
+                session,
+                "http://x",
+                {"p": "v"},
+                "p",
+                "uid",
+                200,
+                100,
+                extraction_filters=["uidadmin"],
+            )
+            assert False, "Expected ValueError"
+        except ValueError:
+            pass
