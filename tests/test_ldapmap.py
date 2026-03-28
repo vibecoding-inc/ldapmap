@@ -271,6 +271,33 @@ class TestDetectInjection(unittest.TestCase):
         )
         self.assertTrue(result)
 
+    def test_probe_attr_used_in_payloads(self):
+        """
+        When probe_attr is supplied, the injected payloads should reference
+        that attribute instead of the default 'objectClass'.
+        """
+        session = MagicMock()
+        session.post.return_value = make_response(200, b"x" * 100)
+        seen_payloads = []
+
+        original_build = ldapmap.build_payload_data
+
+        def capture_build(base_data, param, injection, use_json=False):
+            seen_payloads.append(injection)
+            return original_build(base_data, param, injection, use_json)
+
+        with patch.object(ldapmap, "build_payload_data", side_effect=capture_build):
+            ldapmap.detect_injection(
+                session, "http://x", {"p": "v"}, "p", 200, 100,
+                probe_attr="uid",
+            )
+
+        probe_payloads = [p for p in seen_payloads if "uid" in p]
+        self.assertTrue(probe_payloads, "Expected at least one payload containing 'uid'")
+        # None of the payloads should still reference 'objectClass'
+        for p in seen_payloads:
+            self.assertNotIn("objectClass", p)
+
 
 # ---------------------------------------------------------------------------
 # Tests: discover_attributes
@@ -301,6 +328,41 @@ class TestDiscoverAttributes(unittest.TestCase):
             session, "http://x", {"p": "v"}, "p", 200, 100
         )
         self.assertEqual(found, [])
+
+    def test_uses_custom_attributes_list(self):
+        """
+        When a custom attributes list is passed, only those attributes are
+        probed (not the built-in COMMON_ATTRIBUTES).
+        """
+        session = MagicMock()
+        custom_attrs = ["customAttr1", "customAttr2"]
+
+        def side_effect(url, data, timeout):
+            param_val = data.get("p", "")
+            if "customAttr1" in param_val:
+                return make_response(200, b"x" * 100)  # true
+            return make_response(200, b"y" * 300)  # false
+
+        session.post.side_effect = side_effect
+        found = ldapmap.discover_attributes(
+            session, "http://x", {"p": "v"}, "p", 200, 100,
+            attributes=custom_attrs,
+        )
+        self.assertEqual(found, ["customAttr1"])
+        # Verify only the custom attrs were probed (2 requests)
+        self.assertEqual(session.post.call_count, len(custom_attrs))
+
+    def test_none_attributes_falls_back_to_common(self):
+        """Passing attributes=None should behave identically to the default."""
+        session = MagicMock()
+        session.post.return_value = make_response(200, b"z" * 999)
+        found = ldapmap.discover_attributes(
+            session, "http://x", {"p": "v"}, "p", 200, 100,
+            attributes=None,
+        )
+        self.assertEqual(found, [])
+        # One request per attribute in COMMON_ATTRIBUTES
+        self.assertEqual(session.post.call_count, len(ldapmap.COMMON_ATTRIBUTES))
 
 
 # ---------------------------------------------------------------------------
@@ -369,6 +431,7 @@ class TestParseArgs(unittest.TestCase):
         self.assertEqual(args.param, "a")
         self.assertIsNone(args.proxy)
         self.assertIsNone(args.extract)
+        self.assertIsNone(args.attributes)
 
     def test_optional_proxy(self):
         args = self._parse(["-u", "http://x", "-d", "a=b", "-p", "a",
@@ -412,6 +475,20 @@ class TestParseArgs(unittest.TestCase):
     def test_data_sets_jsondata_to_none(self):
         args = self._parse(["-u", "http://x", "-d", "a=b", "-p", "a"])
         self.assertIsNone(args.jsondata)
+
+    def test_attributes_single(self):
+        args = self._parse(["-u", "http://x", "-d", "a=b", "-p", "a",
+                            "--attributes", "uid"])
+        self.assertEqual(args.attributes, ["uid"])
+
+    def test_attributes_multiple(self):
+        args = self._parse(["-u", "http://x", "-d", "a=b", "-p", "a",
+                            "--attributes", "uid", "--attributes", "cn"])
+        self.assertEqual(args.attributes, ["uid", "cn"])
+
+    def test_attributes_defaults_to_none(self):
+        args = self._parse(["-u", "http://x", "-d", "a=b", "-p", "a"])
+        self.assertIsNone(args.attributes)
 
 
 # ---------------------------------------------------------------------------
@@ -530,6 +607,59 @@ class TestMain(unittest.TestCase):
         args_positional = mock_extract.call_args[0]
         # extract_attribute(session, url, base_data, param, attribute, true_status, true_length, verbose, use_json)
         self.assertEqual(args_positional[8], True)
+
+
+    @patch("ldapmap.discover_attributes", return_value=["uid"])
+    @patch("ldapmap.detect_injection", return_value=True)
+    @patch("ldapmap.calibrate", return_value=(200, 100))
+    @patch("ldapmap.get_baseline", return_value=(200, 100))
+    @patch("ldapmap.build_session")
+    def test_main_attributes_forwarded_to_discover(
+        self, mock_session, mock_baseline, mock_calibrate,
+        mock_detect, mock_discover
+    ):
+        """--attributes should extend the attribute list passed to discover_attributes
+        and set the probe_attr for detect_injection."""
+        with patch("sys.argv", [
+            "ldapmap", "-u", "http://x", "-d", "user=admin&pass=x",
+            "-p", "pass", "--attributes", "uid", "--attributes", "cn",
+        ]):
+            ldapmap.main()
+
+        mock_discover.assert_called_once()
+        # The attributes list passed to discover_attributes should start with
+        # the user-supplied ones and include the built-in COMMON_ATTRIBUTES too.
+        call_args = mock_discover.call_args[0]
+        # attributes is the 9th positional arg (index 8)
+        attr_list = call_args[8]
+        self.assertIn("uid", attr_list)
+        self.assertIn("cn", attr_list)
+        # Extra attrs should appear before the built-in ones
+        self.assertLess(attr_list.index("uid"), attr_list.index("mail"))
+
+        # detect_injection receives probe_attr as first extra-supplied attribute
+        detect_call_args = mock_detect.call_args[0]
+        # detect_injection(session, url, base_data, param, true_status, true_length, verbose, use_json, probe_attr)
+        self.assertEqual(detect_call_args[8], "uid")
+
+    @patch("ldapmap.discover_attributes", return_value=[])
+    @patch("ldapmap.detect_injection", return_value=False)
+    @patch("ldapmap.calibrate", return_value=(200, 100))
+    @patch("ldapmap.get_baseline", return_value=(200, 100))
+    @patch("ldapmap.build_session")
+    def test_main_no_attributes_uses_objectclass_probe(
+        self, mock_session, mock_baseline, mock_calibrate,
+        mock_detect, mock_discover
+    ):
+        """Without --attributes, detect_injection should default to 'objectClass'."""
+        with patch("sys.argv", [
+            "ldapmap", "-u", "http://x", "-d", "user=admin&pass=x", "-p", "pass",
+        ]):
+            ldapmap.main()
+
+        detect_call_args = mock_detect.call_args[0]
+        # probe_attr is at index 8
+        self.assertEqual(detect_call_args[8], "objectClass")
 
 
 if __name__ == "__main__":
