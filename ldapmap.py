@@ -207,6 +207,18 @@ def parse_args() -> argparse.Namespace:
         ),
     )
     parser.add_argument(
+        "--extract-filter",
+        metavar="FILTER",
+        action="append",
+        default=None,
+        dest="extract_filters",
+        help=(
+            "Additional LDAP filter constraint for extraction (repeatable), "
+            "e.g. --extract-filter uid=admin to extract an attribute for a "
+            "specific user."
+        ),
+    )
+    parser.add_argument(
         "--exclude-value",
         metavar="VALUE",
         default=None,
@@ -358,6 +370,7 @@ def main() -> None:
             args.extract, true_status, true_length, args.verbose, use_json,
             true_statuses=true_statuses, false_statuses=false_statuses,
             exclude_value=args.exclude_value, find_all=args.find_all,
+            extraction_filters=args.extract_filters,
         )
         if isinstance(value, list):
             if value:

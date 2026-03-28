@@ -103,3 +103,11 @@ class TestParseArgs:
             "--find-all",
         ])
         assert args.find_all is True
+
+    def test_extract_filter_repeatable(self):
+        args = self._parse([
+            "-u", "http://x", "-d", "a=b", "-p", "a",
+            "--extract-filter", "uid=admin",
+            "--extract-filter", "(cn=John)",
+        ])
+        assert args.extract_filters == ["uid=admin", "(cn=John)"]

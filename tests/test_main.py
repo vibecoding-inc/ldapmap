@@ -196,3 +196,23 @@ class TestMain:
         kwargs = mock_extract.call_args.kwargs
         assert kwargs["exclude_value"] == "admin"
         assert kwargs["find_all"] is True
+
+    @patch("ldapmap.extract_attribute", return_value="secret")
+    @patch("ldapmap.detect_injection", return_value=True)
+    @patch("ldapmap.calibrate", return_value=(200, 100))
+    @patch("ldapmap.get_baseline", return_value=(200, 100))
+    @patch("ldapmap.build_session")
+    def test_main_forwards_extract_filters(
+        self, mock_session, mock_baseline, mock_calibrate,
+        mock_detect, mock_extract
+    ):
+        with patch("sys.argv", [
+            "ldapmap", "-u", "http://x", "-d", "user=admin&pass=x",
+            "-p", "pass", "--extract", "telephoneNumber",
+            "--extract-filter", "uid=admin",
+            "--extract-filter", "(cn=John Doe)",
+        ]):
+            ldapmap.main()
+
+        kwargs = mock_extract.call_args.kwargs
+        assert kwargs["extraction_filters"] == ["uid=admin", "(cn=John Doe)"]
