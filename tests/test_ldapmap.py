@@ -113,6 +113,45 @@ class TestIsTrueResponse(unittest.TestCase):
         resp = make_response(302, b"x" * 500)
         self.assertFalse(ldapmap.is_true_response(resp, 200, 500))
 
+    # ------------------------------------------------------------------
+    # Explicit code-based classification
+    # ------------------------------------------------------------------
+
+    def test_true_codes_matching_returns_true(self):
+        """Status code in true_codes → True regardless of length."""
+        resp = make_response(200, b"x" * 999)  # length differs from baseline
+        result = ldapmap.is_true_response(resp, 200, 100, true_codes={200}, false_codes={401})
+        self.assertIs(result, True)
+
+    def test_false_codes_matching_returns_false(self):
+        """Status code in false_codes → False."""
+        resp = make_response(401, b"x" * 100)
+        result = ldapmap.is_true_response(resp, 200, 100, true_codes={200}, false_codes={401})
+        self.assertIs(result, False)
+
+    def test_unknown_code_returns_none(self):
+        """Status code in neither set → None (error, not FALSE)."""
+        resp = make_response(500, b"server error")
+        result = ldapmap.is_true_response(resp, 200, 100, true_codes={200}, false_codes={401})
+        self.assertIsNone(result)
+
+    def test_only_true_codes_specified_unknown_is_none(self):
+        """With only true_codes set, non-matching status → None."""
+        resp = make_response(403, b"forbidden")
+        result = ldapmap.is_true_response(resp, 200, 100, true_codes={200})
+        self.assertIsNone(result)
+
+    def test_only_false_codes_specified_unknown_is_none(self):
+        """With only false_codes set, non-matching status → None."""
+        resp = make_response(200, b"ok" * 100)
+        result = ldapmap.is_true_response(resp, 200, 100, false_codes={401})
+        self.assertIsNone(result)
+
+    def test_none_response_with_codes_still_false(self):
+        """resp=None always returns False even when codes are specified."""
+        result = ldapmap.is_true_response(None, 200, 500, true_codes={200}, false_codes={401})
+        self.assertFalse(result)
+
 
 # ---------------------------------------------------------------------------
 # Tests: send_request
@@ -146,7 +185,7 @@ class TestSendRequest(unittest.TestCase):
         self.assertIsNone(resp)
 
     def test_verbose_prints_payload(self):
-        """When verbose=True, send_request should print the URL and POST data."""
+        """When verbose=True, send_request should print the URL, POST data, and response status."""
         session = MagicMock()
         session.post.return_value = make_response(200, b"ok")
         with patch("builtins.print") as mock_print:
@@ -154,13 +193,20 @@ class TestSendRequest(unittest.TestCase):
                 session, "http://example.com", {"user": "admin", "pass": "x"},
                 verbose=True,
             )
-        # At least one print call must start with "[V] POST <url>"
-        verbose_calls = [
-            c for c in mock_print.call_args_list
+        all_messages = [
+            c.args[0] for c in mock_print.call_args_list
             if c.args and isinstance(c.args[0], str)
-            and c.args[0].startswith("[V] POST http://example.com")
         ]
-        self.assertTrue(verbose_calls, "Expected a [V] verbose log line")
+        # At least one print call must start with "[V] POST <url>"
+        self.assertTrue(
+            any(m.startswith("[V] POST http://example.com") for m in all_messages),
+            "Expected a [V] verbose log line for the request",
+        )
+        # At least one print call must include the response status code
+        self.assertTrue(
+            any("HTTP 200" in m for m in all_messages),
+            "Expected a [V] verbose log line containing the response status code",
+        )
 
     def test_non_verbose_prints_nothing_extra(self):
         """When verbose=False (default), send_request must not produce output."""
@@ -363,6 +409,76 @@ class TestDiscoverAttributes(unittest.TestCase):
         self.assertEqual(found, [])
         # One request per attribute in COMMON_ATTRIBUTES
         self.assertEqual(session.post.call_count, len(ldapmap.COMMON_ATTRIBUTES))
+
+    def test_payload_contains_opening_bracket_for_next_param(self):
+        """
+        The discovery payload must end with '(' so that the opening bracket
+        for the next LDAP parameter is present, keeping the filter balanced.
+        """
+        session = MagicMock()
+        session.post.return_value = make_response(200, b"x" * 100)
+        seen_payloads = []
+
+        original_build = ldapmap.build_payload_data
+
+        def capture_build(base_data, param, injection, use_json=False):
+            seen_payloads.append(injection)
+            return original_build(base_data, param, injection, use_json)
+
+        with patch.object(ldapmap, "build_payload_data", side_effect=capture_build):
+            ldapmap.discover_attributes(
+                session, "http://x", {"p": "v"}, "p", 200, 100,
+                attributes=["uid"],
+            )
+
+        self.assertEqual(len(seen_payloads), 1)
+        payload = seen_payloads[0]
+        self.assertTrue(
+            payload.endswith("("),
+            f"Discovery payload should end with '(' but got: {payload!r}",
+        )
+
+    def test_error_code_not_counted_as_absent(self):
+        """
+        When an explicit true/false code is set, a response with an unexpected
+        status code should be treated as an error, not as absent (FALSE).
+        """
+        session = MagicMock()
+        # All responses return 500 — neither in true_codes nor false_codes
+        session.post.return_value = make_response(500, b"server error")
+        found = ldapmap.discover_attributes(
+            session, "http://x", {"p": "v"}, "p", 200, 100,
+            attributes=["uid"],
+            true_codes={200},
+            false_codes={401},
+        )
+        # 500 is an error, not FALSE → attribute should NOT appear in found
+        # AND should not be silently counted as absent (just skipped)
+        self.assertEqual(found, [])
+
+    def test_true_code_marks_attribute_present(self):
+        """A response whose status is in true_codes marks the attribute as present."""
+        session = MagicMock()
+        session.post.return_value = make_response(200, b"x" * 999)  # length differs
+        found = ldapmap.discover_attributes(
+            session, "http://x", {"p": "v"}, "p", 200, 100,
+            attributes=["uid"],
+            true_codes={200},
+            false_codes={401},
+        )
+        self.assertIn("uid", found)
+
+    def test_false_code_marks_attribute_absent(self):
+        """A response whose status is in false_codes marks the attribute as absent."""
+        session = MagicMock()
+        session.post.return_value = make_response(401, b"unauthorized")
+        found = ldapmap.discover_attributes(
+            session, "http://x", {"p": "v"}, "p", 200, 100,
+            attributes=["uid"],
+            true_codes={200},
+            false_codes={401},
+        )
+        self.assertEqual(found, [])
 
 
 # ---------------------------------------------------------------------------

