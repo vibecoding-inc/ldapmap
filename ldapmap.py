@@ -39,9 +39,11 @@ from ldapmap_constants import (
     CHARSET,
     COMMON_ATTRIBUTES,
     DETECTION_PAYLOADS,
+    ERROR_SLEEP_SECONDS,
     LENGTH_TOLERANCE,
     LOGIC_PAYLOADS,
     TIMEOUT,
+    TIMEOUT_RETRIES,
 )
 from ldapmap_engine import (
     calibrate,
@@ -72,6 +74,10 @@ def detect_injection(
     probe_attr: str = "objectClass",
     true_statuses: set[int] | None = None,
     false_statuses: set[int] | None = None,
+    timeout: float = TIMEOUT,
+    timeout_retries: int = TIMEOUT_RETRIES,
+    sleep_after_error: bool = True,
+    error_sleep_seconds: float = ERROR_SLEEP_SECONDS,
 ) -> bool:
     """
     Probe the target with common LDAP meta-characters and logic payloads.
@@ -100,7 +106,17 @@ def detect_injection(
 
     for payload in detection_payloads:
         data = build_payload_data(base_data, param, payload, use_json)
-        resp = send_request(session, url, data, verbose, use_json)
+        resp = send_request(
+            session,
+            url,
+            data,
+            verbose,
+            use_json,
+            timeout=timeout,
+            timeout_retries=timeout_retries,
+            sleep_after_error=sleep_after_error,
+            error_sleep_seconds=error_sleep_seconds,
+        )
         if resp is None:
             continue
         length = len(resp.content)
@@ -119,7 +135,17 @@ def detect_injection(
     print("\n[*] AND/OR logic probes:")
     for label, payload in logic_payloads.items():
         data = build_payload_data(base_data, param, payload, use_json)
-        resp = send_request(session, url, data, verbose, use_json)
+        resp = send_request(
+            session,
+            url,
+            data,
+            verbose,
+            use_json,
+            timeout=timeout,
+            timeout_retries=timeout_retries,
+            sleep_after_error=sleep_after_error,
+            error_sleep_seconds=error_sleep_seconds,
+        )
         if resp is None:
             continue
         status_true_set = true_statuses if true_statuses is not None else {true_status}
@@ -142,6 +168,18 @@ def detect_injection(
 
 def parse_args() -> argparse.Namespace:
     """Define and parse command-line arguments."""
+    def _positive_float(value: str) -> float:
+        parsed = float(value)
+        if parsed <= 0:
+            raise argparse.ArgumentTypeError("must be > 0")
+        return parsed
+
+    def _non_negative_int(value: str) -> int:
+        parsed = int(value)
+        if parsed < 0:
+            raise argparse.ArgumentTypeError("must be >= 0")
+        return parsed
+
     parser = argparse.ArgumentParser(
         prog="ldapmap",
         description=(
@@ -243,6 +281,34 @@ def parse_args() -> argparse.Namespace:
         help="Print every outgoing POST payload to stdout.",
     )
     parser.add_argument(
+        "--timeout",
+        metavar="SECONDS",
+        type=_positive_float,
+        default=TIMEOUT,
+        help=f"HTTP request timeout in seconds (default: {TIMEOUT}).",
+    )
+    parser.add_argument(
+        "--timeout-retries",
+        metavar="COUNT",
+        type=_non_negative_int,
+        default=TIMEOUT_RETRIES,
+        help=f"Additional retries after timeout errors (default: {TIMEOUT_RETRIES}).",
+    )
+    parser.add_argument(
+        "--error-sleep-seconds",
+        metavar="SECONDS",
+        type=_non_negative_int,
+        default=ERROR_SLEEP_SECONDS,
+        help=f"Sleep time after request errors in seconds (default: {ERROR_SLEEP_SECONDS}).",
+    )
+    parser.add_argument(
+        "--no-sleep-after-error",
+        action="store_false",
+        dest="sleep_after_error",
+        default=True,
+        help="Disable sleeping after request errors.",
+    )
+    parser.add_argument(
         "--true-status",
         metavar="CODE",
         action="append",
@@ -331,11 +397,32 @@ def main() -> None:
     session = build_session(args.proxy)
 
     # 1. Baseline
-    true_status, true_length = get_baseline(session, args.url, base_data, args.verbose, use_json)
+    true_status, true_length = get_baseline(
+        session,
+        args.url,
+        base_data,
+        args.verbose,
+        use_json,
+        timeout=args.timeout,
+        timeout_retries=args.timeout_retries,
+        sleep_after_error=args.sleep_after_error,
+        error_sleep_seconds=args.error_sleep_seconds,
+    )
 
     # 2. Calibrate TRUE fingerprint
     true_status, true_length = calibrate(
-        session, args.url, base_data, args.param, true_status, true_length, args.verbose, use_json
+        session,
+        args.url,
+        base_data,
+        args.param,
+        true_status,
+        true_length,
+        args.verbose,
+        use_json,
+        timeout=args.timeout,
+        timeout_retries=args.timeout_retries,
+        sleep_after_error=args.sleep_after_error,
+        error_sleep_seconds=args.error_sleep_seconds,
     )
     true_statuses = set(args.true_statuses) if args.true_statuses else {true_status}
     false_statuses = set(args.false_statuses) if args.false_statuses else set()
@@ -353,6 +440,10 @@ def main() -> None:
         probe_attr,
         true_statuses=true_statuses,
         false_statuses=false_statuses,
+        timeout=args.timeout,
+        timeout_retries=args.timeout_retries,
+        sleep_after_error=args.sleep_after_error,
+        error_sleep_seconds=args.error_sleep_seconds,
     )
 
     if not vulnerable:
@@ -371,6 +462,10 @@ def main() -> None:
             true_statuses=true_statuses, false_statuses=false_statuses,
             exclude_value=args.exclude_value, find_all=args.find_all,
             extraction_filters=args.extract_filters,
+            timeout=args.timeout,
+            timeout_retries=args.timeout_retries,
+            sleep_after_error=args.sleep_after_error,
+            error_sleep_seconds=args.error_sleep_seconds,
         )
         if isinstance(value, list):
             if value:
@@ -386,6 +481,10 @@ def main() -> None:
             session, args.url, base_data, args.param, true_status, true_length, args.verbose, use_json,
             all_attrs,
             true_statuses=true_statuses, false_statuses=false_statuses,
+            timeout=args.timeout,
+            timeout_retries=args.timeout_retries,
+            sleep_after_error=args.sleep_after_error,
+            error_sleep_seconds=args.error_sleep_seconds,
         )
         if attrs:
             print(f"\n[+] Discovered attributes: {', '.join(attrs)}")

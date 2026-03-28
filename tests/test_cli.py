@@ -16,6 +16,10 @@ class TestParseArgs:
         assert args.proxy is None
         assert args.extract is None
         assert args.attributes is None
+        assert args.timeout == ldapmap.TIMEOUT
+        assert args.timeout_retries == ldapmap.TIMEOUT_RETRIES
+        assert args.sleep_after_error is True
+        assert args.error_sleep_seconds == ldapmap.ERROR_SLEEP_SECONDS
 
     def test_optional_proxy(self):
         args = self._parse(["-u", "http://x", "-d", "a=b", "-p", "a", "--proxy", "http://127.0.0.1:8080"])
@@ -111,3 +115,28 @@ class TestParseArgs:
             "--extract-filter", "(cn=John)",
         ])
         assert args.extract_filters == ["uid=admin", "(cn=John)"]
+
+    def test_timeout_and_retry_options(self):
+        args = self._parse([
+            "-u", "http://x", "-d", "a=b", "-p", "a",
+            "--timeout", "2.5",
+            "--timeout-retries", "4",
+            "--error-sleep-seconds", "3",
+        ])
+        assert args.timeout == 2.5
+        assert args.timeout_retries == 4
+        assert args.error_sleep_seconds == 3
+
+    def test_can_disable_sleep_after_error(self):
+        args = self._parse([
+            "-u", "http://x", "-d", "a=b", "-p", "a",
+            "--no-sleep-after-error",
+        ])
+        assert args.sleep_after_error is False
+
+    def test_invalid_timeout_exits(self):
+        try:
+            self._parse(["-u", "http://x", "-d", "a=b", "-p", "a", "--timeout", "0"])
+            assert False, "Expected SystemExit"
+        except SystemExit:
+            pass

@@ -54,3 +54,9 @@ LENGTH_TOLERANCE = 20
 
 # Request timeout in seconds
 TIMEOUT = 10
+
+# Number of additional retries after a timeout error
+TIMEOUT_RETRIES = 2
+
+# Delay in seconds between retries/errors when sleep-after-error is enabled
+ERROR_SLEEP_SECONDS = 1

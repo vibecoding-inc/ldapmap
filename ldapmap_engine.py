@@ -6,8 +6,11 @@ from ldapmap_constants import (
     CHARSET,
     COMMON_ATTRIBUTES,
     DETECTION_PAYLOADS,
+    ERROR_SLEEP_SECONDS,
     LENGTH_TOLERANCE,
     LOGIC_PAYLOADS,
+    TIMEOUT,
+    TIMEOUT_RETRIES,
 )
 from ldapmap_http import send_request
 from ldapmap_payloads import (
@@ -52,10 +55,24 @@ def _classify_attribute_payload(
     verbose: bool,
     use_json: bool,
     false_statuses: set[int] | None,
+    timeout: float = TIMEOUT,
+    timeout_retries: int = TIMEOUT_RETRIES,
+    sleep_after_error: bool = True,
+    error_sleep_seconds: float = ERROR_SLEEP_SECONDS,
 ) -> tuple[str, requests.Response | None]:
     """Send one payload and return (classification, response)."""
     data = build_payload_data(base_data, param, payload, use_json)
-    resp = send_request(session, url, data, verbose, use_json)
+    resp = send_request(
+        session,
+        url,
+        data,
+        verbose,
+        use_json,
+        timeout=timeout,
+        timeout_retries=timeout_retries,
+        sleep_after_error=sleep_after_error,
+        error_sleep_seconds=error_sleep_seconds,
+    )
     classification = classify_response(resp, status_true_set, true_length, false_statuses)
     return classification, resp
 
@@ -72,6 +89,10 @@ def _discover_working_template_for_attribute(
     use_json: bool,
     false_statuses: set[int] | None,
     extraction_filters: tuple[LdapFilterNode, ...] | None = None,
+    timeout: float = TIMEOUT,
+    timeout_retries: int = TIMEOUT_RETRIES,
+    sleep_after_error: bool = True,
+    error_sleep_seconds: float = ERROR_SLEEP_SECONDS,
 ) -> int | None:
     """
     Pick a payload variant index that yields TRUE for the given *attribute*.
@@ -92,6 +113,10 @@ def _discover_working_template_for_attribute(
             verbose,
             use_json,
             false_statuses,
+            timeout=timeout,
+            timeout_retries=timeout_retries,
+            sleep_after_error=sleep_after_error,
+            error_sleep_seconds=error_sleep_seconds,
         )
         if classification == "true":
             return idx
@@ -104,13 +129,27 @@ def get_baseline(
     base_data: dict,
     verbose: bool = False,
     use_json: bool = False,
+    timeout: float = TIMEOUT,
+    timeout_retries: int = TIMEOUT_RETRIES,
+    sleep_after_error: bool = True,
+    error_sleep_seconds: float = ERROR_SLEEP_SECONDS,
 ) -> tuple[int, int]:
     """
     Send an unmodified request and return *(status_code, content_length)*.
 
     This baseline is used to detect deviations caused by injected payloads.
     """
-    resp = send_request(session, url, base_data, verbose, use_json)
+    resp = send_request(
+        session,
+        url,
+        base_data,
+        verbose,
+        use_json,
+        timeout=timeout,
+        timeout_retries=timeout_retries,
+        sleep_after_error=sleep_after_error,
+        error_sleep_seconds=error_sleep_seconds,
+    )
     if resp is None:
         print("[!] Could not reach target for baseline request. Aborting.", file=sys.stderr)
         sys.exit(1)
@@ -195,6 +234,10 @@ def calibrate(
     true_length: int,
     verbose: bool = False,
     use_json: bool = False,
+    timeout: float = TIMEOUT,
+    timeout_retries: int = TIMEOUT_RETRIES,
+    sleep_after_error: bool = True,
+    error_sleep_seconds: float = ERROR_SLEEP_SECONDS,
 ) -> tuple[int, int]:
     """
     Attempt to identify a "true" response signature by injecting a wildcard.
@@ -207,7 +250,17 @@ def calibrate(
     Returns the (status, length) pair that represents a TRUE response.
     """
     wildcard_data = build_payload_data(base_data, param, "*", use_json)
-    resp = send_request(session, url, wildcard_data, verbose, use_json)
+    resp = send_request(
+        session,
+        url,
+        wildcard_data,
+        verbose,
+        use_json,
+        timeout=timeout,
+        timeout_retries=timeout_retries,
+        sleep_after_error=sleep_after_error,
+        error_sleep_seconds=error_sleep_seconds,
+    )
     if resp is None:
         return true_status, true_length
 
@@ -238,6 +291,10 @@ def detect_injection(
     probe_attr: str = "objectClass",
     true_statuses: set[int] | None = None,
     false_statuses: set[int] | None = None,
+    timeout: float = TIMEOUT,
+    timeout_retries: int = TIMEOUT_RETRIES,
+    sleep_after_error: bool = True,
+    error_sleep_seconds: float = ERROR_SLEEP_SECONDS,
 ) -> bool:
     """
     Probe the target with common LDAP meta-characters and logic payloads.
@@ -266,7 +323,17 @@ def detect_injection(
 
     for payload in detection_payloads:
         data = build_payload_data(base_data, param, payload, use_json)
-        resp = send_request(session, url, data, verbose, use_json)
+        resp = send_request(
+            session,
+            url,
+            data,
+            verbose,
+            use_json,
+            timeout=timeout,
+            timeout_retries=timeout_retries,
+            sleep_after_error=sleep_after_error,
+            error_sleep_seconds=error_sleep_seconds,
+        )
         if resp is None:
             continue
         length = len(resp.content)
@@ -285,7 +352,17 @@ def detect_injection(
     print("\n[*] AND/OR logic probes:")
     for label, payload in logic_payloads.items():
         data = build_payload_data(base_data, param, payload, use_json)
-        resp = send_request(session, url, data, verbose, use_json)
+        resp = send_request(
+            session,
+            url,
+            data,
+            verbose,
+            use_json,
+            timeout=timeout,
+            timeout_retries=timeout_retries,
+            sleep_after_error=sleep_after_error,
+            error_sleep_seconds=error_sleep_seconds,
+        )
         if resp is None:
             continue
         status_true_set = true_statuses if true_statuses is not None else {true_status}
@@ -313,6 +390,10 @@ def discover_attributes(
     attributes: list[str] | None = None,
     true_statuses: set[int] | None = None,
     false_statuses: set[int] | None = None,
+    timeout: float = TIMEOUT,
+    timeout_retries: int = TIMEOUT_RETRIES,
+    sleep_after_error: bool = True,
+    error_sleep_seconds: float = ERROR_SLEEP_SECONDS,
 ) -> list[str]:
     """
     Iterate through *attributes* and test each with a wildcard payload.
@@ -350,6 +431,10 @@ def discover_attributes(
                 verbose,
                 use_json,
                 false_statuses,
+                timeout=timeout,
+                timeout_retries=timeout_retries,
+                sleep_after_error=sleep_after_error,
+                error_sleep_seconds=error_sleep_seconds,
             )
             if resp is None:
                 continue
@@ -386,6 +471,10 @@ def extract_attribute(
     exclude_value: str | None = None,
     find_all: bool = False,
     extraction_filters: list[str] | None = None,
+    timeout: float = TIMEOUT,
+    timeout_retries: int = TIMEOUT_RETRIES,
+    sleep_after_error: bool = True,
+    error_sleep_seconds: float = ERROR_SLEEP_SECONDS,
 ) -> str | list[str]:
     """
     Extract one or more values of *attribute* using LDAP wildcard probes.
@@ -410,6 +499,10 @@ def extract_attribute(
         use_json,
         false_statuses,
         parsed_extraction_filters,
+        timeout=timeout,
+        timeout_retries=timeout_retries,
+        sleep_after_error=sleep_after_error,
+        error_sleep_seconds=error_sleep_seconds,
     )
     if working_variant_idx is None:
         print(
@@ -439,6 +532,10 @@ def extract_attribute(
             verbose,
             use_json,
             false_statuses,
+            timeout=timeout,
+            timeout_retries=timeout_retries,
+            sleep_after_error=sleep_after_error,
+            error_sleep_seconds=error_sleep_seconds,
         )
         if classification == "error" and resp is not None:
             print(
@@ -466,6 +563,10 @@ def extract_attribute(
             verbose,
             use_json,
             false_statuses,
+            timeout=timeout,
+            timeout_retries=timeout_retries,
+            sleep_after_error=sleep_after_error,
+            error_sleep_seconds=error_sleep_seconds,
         )
         if classification == "error" and resp is not None:
             print(

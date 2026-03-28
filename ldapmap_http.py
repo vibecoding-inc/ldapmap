@@ -1,10 +1,11 @@
 import json
 import sys
+import time
 from urllib.parse import urlencode
 
 import requests
 
-from ldapmap_constants import TIMEOUT
+from ldapmap_constants import ERROR_SLEEP_SECONDS, TIMEOUT, TIMEOUT_RETRIES
 
 
 def build_session(proxy: str | None) -> requests.Session:
@@ -23,6 +24,10 @@ def send_request(
     data: dict,
     verbose: bool = False,
     use_json: bool = False,
+    timeout: float = TIMEOUT,
+    timeout_retries: int = TIMEOUT_RETRIES,
+    sleep_after_error: bool = True,
+    error_sleep_seconds: float = ERROR_SLEEP_SECONDS,
 ) -> requests.Response | None:
     """
     Send a POST request and return the response.
@@ -41,18 +46,35 @@ def send_request(
             print(f"[V] POST {url}  json={json.dumps(data)}")
         else:
             print(f"[V] POST {url}  data={urlencode(data)}")
-    try:
-        post_kwargs = {"json": data} if use_json else {"data": data}
-        resp = session.post(url, **post_kwargs, timeout=TIMEOUT)
-        if verbose:
-            print(f"[V] HTTP {resp.status_code}")
-        return resp
-    except requests.exceptions.ConnectionError as exc:
-        print(f"[!] Connection error: {exc}", file=sys.stderr)
-        return None
-    except requests.exceptions.Timeout:
-        print("[!] Request timed out.", file=sys.stderr)
-        return None
-    except requests.exceptions.RequestException as exc:
-        print(f"[!] Unexpected request error: {exc}", file=sys.stderr)
-        return None
+    post_kwargs = {"json": data} if use_json else {"data": data}
+    attempts = max(1, timeout_retries + 1)
+    for attempt in range(1, attempts + 1):
+        try:
+            resp = session.post(url, **post_kwargs, timeout=timeout)
+            if verbose:
+                print(f"[V] HTTP {resp.status_code}")
+            return resp
+        except requests.exceptions.ConnectionError as exc:
+            print(f"[!] Connection error: {exc}", file=sys.stderr)
+            if sleep_after_error and error_sleep_seconds > 0:
+                time.sleep(error_sleep_seconds)
+            return None
+        except requests.exceptions.Timeout:
+            if attempt < attempts:
+                print(
+                    f"[!] Request timed out (attempt {attempt}/{attempts}); retrying...",
+                    file=sys.stderr,
+                )
+                if sleep_after_error and error_sleep_seconds > 0:
+                    time.sleep(error_sleep_seconds)
+                continue
+            print(f"[!] Request timed out after {attempts} attempts.", file=sys.stderr)
+            if sleep_after_error and error_sleep_seconds > 0:
+                time.sleep(error_sleep_seconds)
+            return None
+        except requests.exceptions.RequestException as exc:
+            print(f"[!] Unexpected request error: {exc}", file=sys.stderr)
+            if sleep_after_error and error_sleep_seconds > 0:
+                time.sleep(error_sleep_seconds)
+            return None
+    return None
